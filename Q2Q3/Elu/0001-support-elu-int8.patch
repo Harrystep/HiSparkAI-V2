@@ -1,0 +1,995 @@
+From 53f5ba6f3782b67253a19c45f52f29c564ea235c Mon Sep 17 00:00:00 2001
+From: gupengcheng0401 <gupengcheng4@huawei.com>
+Date: Sat, 28 Mar 2026 18:09:31 +0800
+Subject: [PATCH] support elu-int8
+
+---
+ .../litert/kernel/cpu/int8/activation_int8.cc |   4 +
+ .../src/litert/kernel/cpu/int8/elu_int8.cc    | 127 +++++++
+ .../src/litert/kernel/cpu/int8/elu_int8.h     |  56 +++
+ .../litert/kernel/cpu/nnacl_c/int8/elu_int8.c | 125 +++++++
+ .../litert/kernel/cpu/nnacl_c/int8/elu_int8.h |  78 ++++
+ .../test/ut/nnacl/int8/elu_int8_test.cc       | 343 ++++++++++++++++++
+ .../nnacl/int8/activation_int8_coder.cc       |   4 +
+ .../opcoders/nnacl/int8/elu_int8_coder.cc     | 101 ++++++
+ .../opcoders/nnacl/int8/elu_int8_coder.h      |  52 +++
+ 9 files changed, 890 insertions(+)
+ create mode 100644 mindspore-lite/src/litert/kernel/cpu/int8/elu_int8.cc
+ create mode 100644 mindspore-lite/src/litert/kernel/cpu/int8/elu_int8.h
+ create mode 100644 mindspore-lite/src/litert/kernel/cpu/nnacl_c/int8/elu_int8.c
+ create mode 100644 mindspore-lite/src/litert/kernel/cpu/nnacl_c/int8/elu_int8.h
+ create mode 100644 mindspore-lite/test/ut/nnacl/int8/elu_int8_test.cc
+ create mode 100644 mindspore-lite/tools/converter/micro/coder/opcoders/nnacl/int8/elu_int8_coder.cc
+ create mode 100644 mindspore-lite/tools/converter/micro/coder/opcoders/nnacl/int8/elu_int8_coder.h
+
+diff --git a/mindspore-lite/src/litert/kernel/cpu/int8/activation_int8.cc b/mindspore-lite/src/litert/kernel/cpu/int8/activation_int8.cc
+index 9bc410e7..b36592a7 100644
+--- a/mindspore-lite/src/litert/kernel/cpu/int8/activation_int8.cc
++++ b/mindspore-lite/src/litert/kernel/cpu/int8/activation_int8.cc
+@@ -19,6 +19,7 @@
+ #include "src/litert/kernel/cpu/int8/sigmoid_int8.h"
+ #include "src/litert/kernel/cpu/int8/tanh_int8.h"
+ #include "src/litert/kernel/cpu/int8/leaky_relu_int8.h"
++#include "src/litert/kernel/cpu/int8/elu_int8.h"
+ #include "schema/model_generated.h"
+ #include "src/litert/kernel_registry.h"
+ #include "include/errorcode.h"
+@@ -56,6 +57,9 @@ kernel::LiteKernel *CpuActivationInt8KernelCreator(const std::vector<lite::Tenso
+     case schema::ActivationType_LEAKY_RELU:
+       kernel = new (std::nothrow) LeakyReluInt8CPUKernel(parameter, inputs, outputs, ctx);
+       break;
++    case schema::ActivationType_ELU:
++      kernel = new (std::nothrow) EluInt8CPUKernel(parameter, inputs, outputs, ctx);
++      break;
+     case schema::ActivationType_TANH:
+       kernel = new (std::nothrow) TanhInt8CPUKernel(parameter, inputs, outputs, ctx);
+       break;
+diff --git a/mindspore-lite/src/litert/kernel/cpu/int8/elu_int8.cc b/mindspore-lite/src/litert/kernel/cpu/int8/elu_int8.cc
+new file mode 100644
+index 00000000..de7ba41b
+--- /dev/null
++++ b/mindspore-lite/src/litert/kernel/cpu/int8/elu_int8.cc
+@@ -0,0 +1,127 @@
++/**
++ * Copyright 2020 Huawei Technologies Co., Ltd
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ * http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#include "src/litert/kernel/cpu/int8/elu_int8.h"
++#include "src/litert/kernel_registry.h"
++
++using mindspore::kernel::KERNEL_ARCH;
++using mindspore::lite::KernelRegistrar;
++using mindspore::lite::RET_ERROR;
++using mindspore::lite::RET_OK;
++using mindspore::schema::PrimitiveType_Activation;
++
++namespace mindspore::kernel {
++namespace {
++int EluInt8Run(void *cdata, int task_id, float, float) {
++  if (cdata == nullptr) {
++    MS_LOG(ERROR) << "input cdata is nullptr!";
++    return RET_ERROR;
++  }
++  auto elu = reinterpret_cast<EluInt8CPUKernel *>(cdata);
++  auto ret = elu->DoExecute(task_id);
++  if (ret != RET_OK) {
++    MS_LOG(ERROR) << "EluInt8Run task_id " << task_id << " failed.";
++    return ret;
++  }
++  return RET_OK;
++}
++}  // namespace
++
++int EluInt8CPUKernel::Prepare() {
++  CHECK_LESS_RETURN(in_tensors_.size(), C1NUM);
++  CHECK_LESS_RETURN(out_tensors_.size(), C1NUM);
++  CHECK_NULL_RETURN(in_tensors_[0]);
++  CHECK_NULL_RETURN(out_tensors_[0]);
++
++  if (in_tensors_[0]->data_type() != mindspore::kNumberTypeInt8 ||
++      out_tensors_[0]->data_type() != mindspore::kNumberTypeInt8) {
++    MS_LOG(ERROR) << "Datatype error, input0 data_type is " << in_tensors_[0]->data_type()
++                  << ", output data_type is " << out_tensors_[0]->data_type();
++    return RET_ERROR;
++  }
++
++  // 设置量化参数
++  quant_elu_parm_.thread_num_ = op_parameter_->thread_num_;
++  quant_elu_parm_.alpha_ = reinterpret_cast<ActivationParameter *>(op_parameter_)->alpha_;
++
++  auto *input_tensor = in_tensors_.at(kInputIndex);
++  auto in_quant_args = input_tensor->quant_params();
++  MS_CHECK_TRUE_MSG(!in_quant_args.empty(), RET_ERROR, "Input quant param cannot be empty.");
++  quant_elu_parm_.in_args_.scale_ = static_cast<float>(in_quant_args.front().scale);
++  quant_elu_parm_.in_args_.zp_ = in_quant_args.front().zeroPoint;
++
++  auto *out_tensor = out_tensors_.at(kOutputIndex);
++  auto out_quant_args = out_tensor->quant_params();
++  MS_CHECK_TRUE_MSG(!out_quant_args.empty(), RET_ERROR, "Output quant param cannot be empty.");
++  quant_elu_parm_.out_args_.scale_ = static_cast<float>(out_quant_args.front().scale);
++  quant_elu_parm_.out_args_.zp_ = out_quant_args.front().zeroPoint;
++
++  if (!InferShapeDone()) {
++    return RET_OK;
++  }
++  return ReSize();
++}
++
++EluInt8CPUKernel::~EluInt8CPUKernel() {
++  // 释放 LUT 内存
++  EluInt8FreeLUT(&quant_elu_parm_);
++}
++
++int EluInt8CPUKernel::ReSize() {
++  auto *input_tensor = in_tensors_.at(kInputIndex);
++  MS_CHECK_GT(input_tensor->ElementsNum(), 0, RET_ERROR);
++  quant_elu_parm_.element_num = input_tensor->ElementsNum();
++
++  // 初始化或重新初始化 LUT (仅在形状变化时需要)
++  // 如果 LUT 已初始化且量化参数未变，可以跳过
++  if (!quant_elu_parm_.table_initialized_) {
++    int ret = EluInt8InitLUT(&quant_elu_parm_);
++    if (ret != NNACL_OK) {
++      MS_LOG(ERROR) << "EluInt8InitLUT failed: " << ret;
++      return RET_ERROR;
++    }
++  }
++
++  return RET_OK;
++}
++
++int EluInt8CPUKernel::Run() {
++  auto ret = ParallelLaunch(this->ms_context_, EluInt8Run, this, op_parameter_->thread_num_);
++  if (ret != RET_OK) {
++    MS_LOG(ERROR) << "EluInt8 Run failed.";
++  }
++  return ret;
++}
++
++int EluInt8CPUKernel::DoExecute(int task_id) {
++  auto input_tensor = in_tensors_.at(kInputIndex);
++  auto out_tensor = out_tensors_.at(kOutputIndex);
++  int8_t *input_data = reinterpret_cast<int8_t *>(input_tensor->data());
++  int8_t *output_data = reinterpret_cast<int8_t *>(out_tensor->data());
++  MS_ASSERT(input_data);
++  MS_ASSERT(output_data);
++
++  // 纯整数查表操作，无浮点计算
++  auto ret = DoEluInt8(input_data, output_data, &quant_elu_parm_, task_id);
++  if (ret != NNACL_OK) {
++    MS_LOG(ERROR) << "DoEluInt8 failed: " << ret;
++    return RET_ERROR;
++  }
++  return RET_OK;
++}
++
++REG_KERNEL(kCPU, kNumberTypeInt8, PrimitiveType_Activation, LiteKernelCreator<EluInt8CPUKernel>)
++}  // namespace mindspore::kernel
+diff --git a/mindspore-lite/src/litert/kernel/cpu/int8/elu_int8.h b/mindspore-lite/src/litert/kernel/cpu/int8/elu_int8.h
+new file mode 100644
+index 00000000..7f92318e
+--- /dev/null
++++ b/mindspore-lite/src/litert/kernel/cpu/int8/elu_int8.h
+@@ -0,0 +1,56 @@
++/**
++ * Copyright 2020 Huawei Technologies Co., Ltd
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ * http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#ifndef MINDSPORE_LITE_SRC_RUNTIME_KERNEL_CPU_INT8_ELU_INT8_H_
++#define MINDSPORE_LITE_SRC_RUNTIME_KERNEL_CPU_INT8_ELU_INT8_H_
++
++#include <vector>
++#include "include/errorcode.h"
++#include "nnacl_c/fp32/activation_fp32.h"
++#include "nnacl_c/int8/elu_int8.h"
++#include "src/litert/lite_kernel.h"
++
++namespace mindspore::kernel {
++
++/**
++ * @brief ELU INT8 CPU Kernel
++ *
++ * 使用 LUT (Lookup Table) 方案实现纯 INT8 量化计算
++ * 在 Prepare 阶段初始化查找表，Run 阶段直接查表
++ */
++class EluInt8CPUKernel : public LiteKernel {
++ public:
++  EluInt8CPUKernel(OpParameter *parameter, const std::vector<lite::Tensor *> &inputs,
++                   const std::vector<lite::Tensor *> &outputs, const lite::InnerContext *ctx)
++      : LiteKernel(parameter, inputs, outputs, ctx) {
++    quant_elu_parm_.lut_table_ = nullptr;
++    quant_elu_parm_.table_initialized_ = 0;
++  }
++
++  ~EluInt8CPUKernel() override;
++
++  int Prepare() override;
++  int ReSize() override;
++  int Run() override;
++  int DoExecute(int task_id);
++
++ private:
++  EluInt8QuantArg quant_elu_parm_;
++};
++
++}  // namespace mindspore::kernel
++
++#endif  // MINDSPORE_LITE_SRC_RUNTIME_KERNEL_CPU_INT8_ELU_INT8_H_
+diff --git a/mindspore-lite/src/litert/kernel/cpu/nnacl_c/int8/elu_int8.c b/mindspore-lite/src/litert/kernel/cpu/nnacl_c/int8/elu_int8.c
+new file mode 100644
+index 00000000..770a369a
+--- /dev/null
++++ b/mindspore-lite/src/litert/kernel/cpu/nnacl_c/int8/elu_int8.c
+@@ -0,0 +1,125 @@
++/**
++ * Copyright 2020 Huawei Technologies Co., Ltd
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ * http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#include "nnacl_c/int8/elu_int8.h"
++#include "nnacl_c/errorcode.h"
++#include <math.h>
++#include <stdlib.h>
++#include <string.h>
++
++/**
++ * @brief 初始化 ELU INT8 查找表
++ *
++ * 为所有 256 个可能的 INT8 输入值预计算对应的 ELU 输出
++ * 这是在初始化阶段完成的，推理阶段只需查表
++ */
++int EluInt8InitLUT(EluInt8QuantArg *quant_arg) {
++  if (quant_arg == NULL) {
++    return NNACL_NULL_PTR;
++  }
++
++  // 分配 LUT 内存 (256 bytes)
++  if (quant_arg->lut_table_ == NULL) {
++    quant_arg->lut_table_ = (int8_t *)malloc(256 * sizeof(int8_t));
++    if (quant_arg->lut_table_ == NULL) {
++      return NNACL_NO_MEMORY;
++    }
++  }
++
++  // 获取量化参数
++  float input_scale = quant_arg->in_args_.scale_;
++  int input_zp = quant_arg->in_args_.zp_;
++  float output_scale = quant_arg->out_args_.scale_;
++  int output_zp = quant_arg->out_args_.zp_;
++  float alpha = quant_arg->alpha_;
++  const float output_inverse_scale = 1.0f / output_scale;
++
++  // 生成 LUT: 对所有 256 个可能的 INT8 输入值
++  for (int i = 0; i < 256; i++) {
++    // 将索引 [0, 255] 映射到实际的 int8 值 [-128, 127]
++    int8_t input_val = (int8_t)(i - 128);
++
++    // 步骤1: 反量化到浮点域 (仅在此阶段使用浮点)
++    float input_real = ((int)input_val - input_zp) * input_scale;
++
++    // 步骤2: 应用 ELU 激活函数
++    // ELU(x) = x                  if x > 0
++    //        = alpha * (exp(x) - 1) if x <= 0
++    float output_real;
++    if (input_real > 0) {
++      output_real = input_real;
++    } else {
++      // 使用 expm1(x) = exp(x) - 1 提高小数值精度
++      output_real = expm1f(input_real) * alpha;
++    }
++
++    // 步骤3: 量化回 int8
++    int32_t output_tmp = (int32_t)round(output_real * output_inverse_scale) + output_zp;
++
++    // 步骤4: 饱和截断到 int8 范围
++    if (output_tmp > 127) {
++      output_tmp = 127;
++    } else if (output_tmp < -128) {
++      output_tmp = -128;
++    }
++
++    quant_arg->lut_table_[i] = (int8_t)output_tmp;
++  }
++
++  quant_arg->table_initialized_ = 1;
++  return NNACL_OK;
++}
++
++/**
++ * @brief 释放 ELU INT8 查找表内存
++ */
++void EluInt8FreeLUT(EluInt8QuantArg *quant_arg) {
++  if (quant_arg != NULL && quant_arg->lut_table_ != NULL) {
++    free(quant_arg->lut_table_);
++    quant_arg->lut_table_ = NULL;
++    quant_arg->table_initialized_ = 0;
++  }
++}
++
++/**
++ * @brief ELU INT8 计算函数 (使用 LUT)
++ *
++ * 推理阶段：纯整数查表，无浮点计算
++ * 将输入值作为索引直接查找预计算的输出值
++ */
++int DoEluInt8(const int8_t *inputs, int8_t *outputs, const EluInt8QuantArg *quant_arg, int task_id) {
++  if (quant_arg == NULL || inputs == NULL || outputs == NULL) {
++    return NNACL_NULL_PTR;
++  }
++
++  if (quant_arg->lut_table_ == NULL) {
++    return NNACL_NULL_PTR;
++  }
++
++  const int8_t *lut = quant_arg->lut_table_;
++
++  // 多线程并行处理
++  // 纯整数查表操作，无浮点计算
++  for (int i = task_id; i < quant_arg->element_num; i += quant_arg->thread_num_) {
++    // 将 signed int8 转换为 unsigned index
++    // -128 → 0, -127 → 1, ..., 0 → 128, ..., 127 → 255
++    // 利用 C 语言的无符号溢出语义实现
++    uint8_t idx = (uint8_t)inputs[i];
++    outputs[i] = lut[idx];
++  }
++
++  return NNACL_OK;
++}
+diff --git a/mindspore-lite/src/litert/kernel/cpu/nnacl_c/int8/elu_int8.h b/mindspore-lite/src/litert/kernel/cpu/nnacl_c/int8/elu_int8.h
+new file mode 100644
+index 00000000..a45373dc
+--- /dev/null
++++ b/mindspore-lite/src/litert/kernel/cpu/nnacl_c/int8/elu_int8.h
+@@ -0,0 +1,78 @@
++/**
++ * Copyright 2020 Huawei Technologies Co., Ltd
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ * http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#ifndef NNACL_INT8_ELU_INT8_H_
++#define NNACL_INT8_ELU_INT8_H_
++
++#include "nnacl_c/op_base.h"
++#include "nnacl_c/int8/quantize.h"
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++/**
++ * @brief ELU INT8 量化参数结构体
++ *
++ * 使用 LUT (Lookup Table) 方案实现纯 INT8 计算
++ * 在 Prepare 阶段生成 256 元素的查找表，推理阶段直接查表
++ */
++typedef struct EluInt8QuantArg {
++  QuantArg in_args_;       /* 输入量化参数 */
++  QuantArg out_args_;      /* 输出量化参数 */
++  float alpha_;            /* ELU alpha 参数 */
++  int8_t *lut_table_;      /* 查找表指针 (256 元素) */
++  int table_initialized_;  /* 表是否已初始化标志 */
++  int element_num;         /* 元素数量 */
++  int thread_num_;         /* 线程数 */
++} EluInt8QuantArg;
++
++/**
++ * @brief 初始化 ELU INT8 查找表
++ *
++ * 在 Prepare 阶段调用，生成 256 个可能的 INT8 输入对应的输出
++ * 这是唯一使用浮点计算的阶段
++ *
++ * @param quant_arg ELU 量化参数结构体指针
++ * @return NNACL_OK 成功，其他值表示错误
++ */
++int EluInt8InitLUT(EluInt8QuantArg *quant_arg);
++
++/**
++ * @brief 释放 ELU INT8 查找表内存
++ *
++ * @param quant_arg ELU 量化参数结构体指针
++ */
++void EluInt8FreeLUT(EluInt8QuantArg *quant_arg);
++
++/**
++ * @brief ELU INT8 计算函数 (使用 LUT)
++ *
++ * 纯整数查表操作，推理阶段无浮点计算
++ *
++ * @param inputs 输入 int8 数据指针
++ * @param outputs 输出 int8 数据指针
++ * @param quant_arg ELU 量化参数结构体指针
++ * @param task_id 任务 ID，用于多线程并行处理
++ * @return NNACL_OK 成功，其他值表示错误
++ */
++int DoEluInt8(const int8_t *inputs, int8_t *outputs, const EluInt8QuantArg *quant_arg, int task_id);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif  // NNACL_INT8_ELU_INT8_H_
+diff --git a/mindspore-lite/test/ut/nnacl/int8/elu_int8_test.cc b/mindspore-lite/test/ut/nnacl/int8/elu_int8_test.cc
+new file mode 100644
+index 00000000..0e062c6b
+--- /dev/null
++++ b/mindspore-lite/test/ut/nnacl/int8/elu_int8_test.cc
+@@ -0,0 +1,343 @@
++/**
++ * Copyright 2026 Huawei Technologies Co., Ltd
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ * http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++#include <iostream>
++#include <cmath>
++#include "gtest/gtest.h"
++#include "nnacl_c/int8/elu_int8.h"
++#include "nnacl_c/int8/quantize.h"
++
++namespace mindspore {
++class EluInt8Test : public ::testing::Test {
++ public:
++  EluInt8Test() {}
++  void SetUp() override {
++    // 初始化量化参数
++    quant_parm_.in_args_.scale_ = 0.1f;
++    quant_parm_.in_args_.zp_ = 0;
++    quant_parm_.out_args_.scale_ = 0.1f;
++    quant_parm_.out_args_.zp_ = 0;
++    quant_parm_.alpha_ = 1.0f;
++    quant_parm_.lut_table_ = nullptr;
++    quant_parm_.table_initialized_ = 0;
++    quant_parm_.thread_num_ = 1;
++  }
++
++  void TearDown() override {
++    // 清理 LUT 内存
++    EluInt8FreeLUT(&quant_parm_);
++  }
++
++ protected:
++  EluInt8QuantArg quant_parm_;
++};
++
++float get_cosine_similarity_int8(const int8_t *arr1, const int8_t *arr2, size_t cmp_size) {
++  if (arr1 == nullptr || arr2 == nullptr || cmp_size == 0) {
++    return 0.0f;
++  }
++  float dot_product = 0.0f;
++  float norm1 = 0.0f;
++  float norm2 = 0.0f;
++  for (size_t i = 0; i < cmp_size; ++i) {
++    dot_product += (float)arr1[i] * (float)arr2[i];
++    norm1 += (float)arr1[i] * (float)arr1[i];
++    norm2 += (float)arr2[i] * (float)arr2[i];
++  }
++  norm1 = std::sqrt(norm1);
++  norm2 = std::sqrt(norm2);
++  float norms_product = norm1 * norm2;
++  const float FLOAT_EPS = 1e-6f;
++  if (std::fabs(norms_product) < FLOAT_EPS) {
++    return 0.0f;
++  }
++  float cosine_similarity = dot_product / norms_product;
++  return cosine_similarity;
++}
++
++float accuracy_threshold = 0.99f;
++
++// 测试 LUT 初始化
++TEST_F(EluInt8Test, LUTInit) {
++  int ret = EluInt8InitLUT(&quant_parm_);
++  ASSERT_EQ(ret, NNACL_OK);
++  ASSERT_NE(quant_parm_.lut_table_, nullptr);
++  ASSERT_EQ(quant_parm_.table_initialized_, 1);
++
++  // 验证 LUT 的一些关键点
++  // 对于正值输入，输出应接近输入
++  // input=0 (index 128) → output ≈ 0
++  // input=127 (index 255) → output ≈ 127 (饱和)
++  EXPECT_GE(quant_parm_.lut_table_[128], -1);   // input=0
++  EXPECT_LE(quant_parm_.lut_table_[128], 1);
++}
++
++// 测试基础功能：正值、负值、零值
++TEST_F(EluInt8Test, EluBasic) {
++  quant_parm_.element_num = 10;
++  ASSERT_EQ(NNACL_OK, EluInt8InitLUT(&quant_parm_));
++
++  // 输入数据：包含正值、负值和零值
++  std::vector<int8_t> input = {-128, -100, -50, -10, -1, 0, 1, 10, 50, 127};
++  std::vector<int8_t> output(10);
++
++  // 调用 ELU int8 函数
++  int ret = DoEluInt8(input.data(), output.data(), &quant_parm_, 0);
++  ASSERT_EQ(ret, NNACL_OK);
++
++  // 输出结果用于调试
++  std::cout << "EluInt8Test output:\n";
++  std::for_each(output.begin(), output.end(), [](int8_t value) {
++    std::cout << static_cast<int32_t>(value) << ", ";
++  });
++  std::cout << "\n";
++
++  // 验证所有输出在 int8 范围内
++  for (int i = 0; i < 10; i++) {
++    EXPECT_GE(output[i], -128);
++    EXPECT_LE(output[i], 127);
++  }
++
++  // 验证正值部分：输出应该接近输入
++  // 对于 input[5]=0, input[6]=1, input[7]=10, input[8]=50, input[9]=127
++  // 由于量化误差，检查输出在合理范围内
++  for (int i = 5; i < 10; i++) {
++    EXPECT_GE(output[i], -128);
++    EXPECT_LE(output[i], 127);
++  }
++}
++
++// 测试自定义 alpha 参数
++TEST_F(EluInt8Test, EluCustomAlpha) {
++  quant_parm_.alpha_ = 0.5f;  // alpha = 0.5
++  quant_parm_.element_num = 7;
++  ASSERT_EQ(NNACL_OK, EluInt8InitLUT(&quant_parm_));
++
++  std::vector<int8_t> input = {-50, -20, -5, 0, 5, 20, 50};
++  std::vector<int8_t> output(7);
++
++  int ret = DoEluInt8(input.data(), output.data(), &quant_parm_, 0);
++  ASSERT_EQ(ret, NNACL_OK);
++
++  std::cout << "EluInt8Test with alpha=0.5 output:\n";
++  std::for_each(output.begin(), output.end(), [](int8_t value) {
++    std::cout << static_cast<int32_t>(value) << ", ";
++  });
++  std::cout << "\n";
++
++  // 验证所有输出在 int8 范围内
++  for (int i = 0; i < 7; i++) {
++    EXPECT_GE(output[i], -128);
++    EXPECT_LE(output[i], 127);
++  }
++}
++
++// 测试边界条件：全正值
++TEST_F(EluInt8Test, EluAllPositive) {
++  quant_parm_.element_num = 5;
++  ASSERT_EQ(NNACL_OK, EluInt8InitLUT(&quant_parm_));
++
++  std::vector<int8_t> input = {1, 10, 50, 100, 127};
++  std::vector<int8_t> output(5);
++
++  int ret = DoEluInt8(input.data(), output.data(), &quant_parm_, 0);
++  ASSERT_EQ(ret, NNACL_OK);
++
++  // 对于全正值，ELU 输出应等于输入（恒等映射）
++  for (int i = 0; i < 5; i++) {
++    EXPECT_EQ(output[i], input[i]);
++  }
++}
++
++// 测试边界条件：全负值
++TEST_F(EluInt8Test, EluAllNegative) {
++  quant_parm_.element_num = 5;
++  ASSERT_EQ(NNACL_OK, EluInt8InitLUT(&quant_parm_));
++
++  std::vector<int8_t> input = {-1, -10, -50, -100, -127};
++  std::vector<int8_t> output(5);
++
++  int ret = DoEluInt8(input.data(), output.data(), &quant_parm_, 0);
++  ASSERT_EQ(ret, NNACL_OK);
++
++  std::cout << "EluInt8Test all negative output:\n";
++  std::for_each(output.begin(), output.end(), [](int8_t value) {
++    std::cout << static_cast<int32_t>(value) << ", ";
++  });
++  std::cout << "\n";
++
++  // 对于负值，ELU 输出应为负值或零
++  for (int i = 0; i < 5; i++) {
++    EXPECT_LE(output[i], 0);
++  }
++}
++
++// 测试非对称量化参数
++TEST_F(EluInt8Test, EluAsymmetricQuant) {
++  // 非对称量化参数
++  quant_parm_.in_args_.scale_ = 0.05f;
++  quant_parm_.in_args_.zp_ = -100;
++  quant_parm_.out_args_.scale_ = 0.04f;
++  quant_parm_.out_args_.zp_ = 50;
++  quant_parm_.element_num = 5;
++
++  ASSERT_EQ(NNACL_OK, EluInt8InitLUT(&quant_parm_));
++
++  std::vector<int8_t> input = {-128, -64, 0, 64, 127};
++  std::vector<int8_t> output(5);
++
++  int ret = DoEluInt8(input.data(), output.data(), &quant_parm_, 0);
++  ASSERT_EQ(ret, NNACL_OK);
++
++  // 验证所有输出在 int8 范围内
++  for (int i = 0; i < 5; i++) {
++    EXPECT_GE(output[i], -128);
++    EXPECT_LE(output[i], 127);
++  }
++}
++
++// 测试精度验证：与 FP32 结果对比
++TEST_F(EluInt8Test, EluAccuracyCheck) {
++  quant_parm_.element_num = 9;
++  ASSERT_EQ(NNACL_OK, EluInt8InitLUT(&quant_parm_));
++
++  std::vector<int8_t> input = {-100, -50, -20, -5, 0, 5, 20, 50, 100};
++  std::vector<int8_t> output(9);
++  std::vector<int8_t> benchmark(9);
++
++  // 生成 benchmark 数据（使用 FP32 ELU 计算）
++  for (int i = 0; i < 9; i++) {
++    float input_real = input[i] * quant_parm_.in_args_.scale_;
++    float output_real;
++    if (input_real > 0) {
++      output_real = input_real;
++    } else {
++      output_real = expm1f(input_real);
++    }
++    int8_t expected = static_cast<int8_t>(
++        std::round(output_real / quant_parm_.out_args_.scale_) + quant_parm_.out_args_.zp_);
++    expected = std::max(-128, std::min(127, static_cast<int>(expected)));
++    benchmark[i] = expected;
++  }
++
++  // 调用 INT8 ELU
++  int ret = DoEluInt8(input.data(), output.data(), &quant_parm_, 0);
++  ASSERT_EQ(ret, NNACL_OK);
++
++  // 输出对比结果
++  std::cout << "EluInt8Test accuracy comparison:\n";
++  std::cout << "input:    ";
++  std::for_each(input.begin(), input.end(), [](int8_t v) { std::cout << std::setw(4) << (int)v << " "; });
++  std::cout << "\noutput:   ";
++  std::for_each(output.begin(), output.end(), [](int8_t v) { std::cout << std::setw(4) << (int)v << " "; });
++  std::cout << "\nbenchmark:";
++  std::for_each(benchmark.begin(), benchmark.end(), [](int8_t v) { std::cout << std::setw(4) << (int)v << " "; });
++  std::cout << "\n";
++
++  // 验证 LUT 结果与 FP32 计算结果一致
++  for (int i = 0; i < 9; i++) {
++    EXPECT_EQ(output[i], benchmark[i]) << "Mismatch at index " << i
++                                         << ": input=" << (int)input[i]
++                                         << ", output=" << (int)output[i]
++                                         << ", expected=" << (int)benchmark[i];
++  }
++}
++
++// 测试多线程场景
++TEST_F(EluInt8Test, EluMultiThread) {
++  const int element_num = 100;
++  quant_parm_.element_num = element_num;
++  quant_parm_.thread_num_ = 4;  // 使用 4 个线程
++  ASSERT_EQ(NNACL_OK, EluInt8InitLUT(&quant_parm_));
++
++  std::vector<int8_t> input(element_num);
++  std::vector<int8_t> output(element_num);
++
++  // 填充测试数据
++  for (int i = 0; i < element_num; i++) {
++    input[i] = static_cast<int8_t>(i - 50);
++  }
++
++  // 调用 DoEluInt8 多次，模拟多线程
++  for (int task_id = 0; task_id < 4; task_id++) {
++    int ret = DoEluInt8(input.data(), output.data(), &quant_parm_, task_id);
++    ASSERT_EQ(ret, NNACL_OK);
++  }
++
++  // 验证所有输出在 int8 范围内
++  for (int i = 0; i < element_num; i++) {
++    EXPECT_GE(output[i], -128);
++    EXPECT_LE(output[i], 127);
++  }
++}
++
++// 测试 LUT 内存管理
++TEST_F(EluInt8Test, LUTMemoryManagement) {
++  // 第一次初始化
++  int ret = EluInt8InitLUT(&quant_parm_);
++  ASSERT_EQ(ret, NNACL_OK);
++  void *lut_ptr = quant_parm_.lut_table_;
++  ASSERT_NE(lut_ptr, nullptr);
++
++  // 重复初始化应该正确处理
++  ret = EluInt8InitLUT(&quant_parm_);
++  ASSERT_EQ(ret, NNACL_OK);
++  // LUT 指针应该不变（已初始化则不重新分配）
++  EXPECT_EQ(lut_ptr, quant_parm_.lut_table_);
++
++  // 清理
++  EluInt8FreeLUT(&quant_parm_);
++  EXPECT_EQ(quant_parm_.lut_table_, nullptr);
++
++  // 重复清理应该是安全的
++  EluInt8FreeLUT(&quant_parm_);
++  EXPECT_EQ(quant_parm_.lut_table_, nullptr);
++}
++
++// 测试不同 scale 值
++TEST_F(EluInt8Test, EluDifferentScales) {
++  quant_parm_.element_num = 5;
++
++  // 测试不同的 scale 组合
++  std::vector<std::pair<float, float>> scales = {
++    {0.01f, 0.01f},
++    {0.1f, 0.1f},
++    {0.5f, 0.5f},
++    {0.01f, 0.1f},
++    {0.1f, 0.01f}
++  };
++
++  for (auto scales : scales) {
++    EluInt8FreeLUT(&quant_parm_);
++    quant_parm_.in_args_.scale_ = scales.first;
++    quant_parm_.out_args_.scale_ = scales.second;
++
++    ASSERT_EQ(NNACL_OK, EluInt8InitLUT(&quant_parm_));
++
++    std::vector<int8_t> input = {-50, -10, 0, 10, 50};
++    std::vector<int8_t> output(5);
++
++    int ret = DoEluInt8(input.data(), output.data(), &quant_parm_, 0);
++    ASSERT_EQ(ret, NNACL_OK);
++
++    // 验证所有输出在 int8 范围内
++    for (int i = 0; i < 5; i++) {
++      EXPECT_GE(output[i], -128);
++      EXPECT_LE(output[i], 127);
++    }
++  }
++}
++
++}  // namespace mindspore
+diff --git a/mindspore-lite/tools/converter/micro/coder/opcoders/nnacl/int8/activation_int8_coder.cc b/mindspore-lite/tools/converter/micro/coder/opcoders/nnacl/int8/activation_int8_coder.cc
+index 38cd39b2..ef0ff8b4 100644
+--- a/mindspore-lite/tools/converter/micro/coder/opcoders/nnacl/int8/activation_int8_coder.cc
++++ b/mindspore-lite/tools/converter/micro/coder/opcoders/nnacl/int8/activation_int8_coder.cc
+@@ -22,6 +22,7 @@
+ #include "schema/model_generated.h"
+ #include "src/common/version_manager.h"
+ #include "coder/opcoders/nnacl/int8/leaky_relu_int8_coder.h"
++#include "coder/opcoders/nnacl/int8/elu_int8_coder.h"
+ 
+ using mindspore::schema::PrimitiveType_Activation;
+ 
+@@ -66,6 +67,9 @@ std::unique_ptr<OperatorCoder> CPUActivationINT8CoderCreator(const std::vector<T
+     case schema::ActivationType_LEAKY_RELU:
+       coder = CPUOpCoderCreator<LeakyReluInt8Coder>(in_tensors, out_tensors, node, node_index, target, schema_version);
+       break;
++    case schema::ActivationType_ELU:
++      coder = CPUOpCoderCreator<EluInt8Coder>(in_tensors, out_tensors, node, node_index, target, schema_version);
++      break;
+     default:
+       break;
+   }
+diff --git a/mindspore-lite/tools/converter/micro/coder/opcoders/nnacl/int8/elu_int8_coder.cc b/mindspore-lite/tools/converter/micro/coder/opcoders/nnacl/int8/elu_int8_coder.cc
+new file mode 100644
+index 00000000..34fe270f
+--- /dev/null
++++ b/mindspore-lite/tools/converter/micro/coder/opcoders/nnacl/int8/elu_int8_coder.cc
+@@ -0,0 +1,101 @@
++/**
++ * Copyright 2022 Huawei Technologies Co., Ltd
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ * http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#include "coder/opcoders/nnacl/int8/elu_int8_coder.h"
++#include "include/errorcode.h"
++#include "coder/log.h"
++#include "coder/opcoders/serializers/nnacl_serializer/nnacl_int8_serializer.h"
++#include "coder/opcoders/file_collector.h"
++
++using mindspore::schema::PrimitiveType_Activation;
++
++namespace mindspore::lite::micro::nnacl {
++
++int EluInt8Coder::Prepare(CoderContext *context) {
++  quant_elu_parm_.thread_num_ = 1;  // Micro 场景通常单线程
++  quant_elu_parm_.alpha_ = reinterpret_cast<ActivationParameter *>(parameter_)->alpha_;
++
++  auto *input_tensor = input_tensors_.at(kInputIndex);
++  auto in_quant_args = input_tensor->quant_params();
++  MS_CHECK_TRUE_MSG(!in_quant_args.empty(), RET_ERROR, "Input quant param cannot be empty.");
++  quant_elu_parm_.in_args_.scale_ = static_cast<float>(in_quant_args.front().scale);
++  quant_elu_parm_.in_args_.zp_ = in_quant_args.front().zeroPoint;
++
++  auto *out_tensor = output_tensors_.at(kOutputIndex);
++  auto out_quant_args = out_tensor->quant_params();
++  MS_CHECK_TRUE_MSG(!out_quant_args.empty(), RET_ERROR, "Output quant param cannot be empty.");
++  quant_elu_parm_.out_args_.scale_ = static_cast<float>(out_quant_args.front().scale);
++  quant_elu_parm_.out_args_.zp_ = out_quant_args.front().zeroPoint;
++
++  MS_CHECK_GT(input_tensor->ElementsNum(), 0, RET_ERROR);
++  quant_elu_parm_.element_num = input_tensor->ElementsNum();
++
++  // 初始化 LUT (用于验证)
++  int ret = EluInt8InitLUT(&quant_elu_parm_);
++  if (ret != NNACL_OK) {
++    MS_LOG(ERROR) << "EluInt8InitLUT failed: " << ret;
++    return RET_ERROR;
++  }
++
++  return RET_OK;
++}
++
++int EluInt8Coder::DoCode(CoderContext *const context) {
++  Collect(context,
++          {
++            "nnacl_c/int8/elu_int8.h",
++          },
++          {
++            "elu_int8.c",
++          });
++
++  NNaclInt8Serializer code;
++
++  // 手动生成 ELU 量化参数结构体初始化代码
++  // 使用 LeakyReluQuantArg 存储基本量化参数
++  code << "\n// ELU INT8 parameters\n";
++  code << "EluInt8QuantArg elu_quant_arg;\n";
++  code << "elu_quant_arg.in_args_.scale_ = " << quant_elu_parm_.in_args_.scale_ << "f;\n";
++  code << "elu_quant_arg.in_args_.zp_ = " << quant_elu_parm_.in_args_.zp_ << ";\n";
++  code << "elu_quant_arg.out_args_.scale_ = " << quant_elu_parm_.out_args_.scale_ << "f;\n";
++  code << "elu_quant_arg.out_args_.zp_ = " << quant_elu_parm_.out_args_.zp_ << ";\n";
++  code << "elu_quant_arg.alpha_ = " << quant_elu_parm_.alpha_ << "f;\n";
++  code << "elu_quant_arg.element_num = " << quant_elu_parm_.element_num << ";\n";
++  code << "elu_quant_arg.thread_num_ = 1;\n";
++  code << "elu_quant_arg.lut_table_ = NULL;\n";
++  code << "elu_quant_arg.table_initialized_ = 0;\n";
++  code << "\n";
++
++  // 生成 LUT 初始化代码
++  code << "// Initialize ELU LUT\n";
++  code << "EluInt8InitLUT(&elu_quant_arg);\n";
++  code << "\n";
++
++  // 生成计算代码
++  code << "// Compute ELU using LUT\n";
++  code.CodeFunction("DoEluInt8", input_tensor_, output_tensor_, "&elu_quant_arg", 0);
++  code << "\n";
++
++  // 生成清理代码
++  code << "// Cleanup LUT memory\n";
++  code.CodeFunction("EluInt8FreeLUT", "&elu_quant_arg");
++
++  context->AppendCode(code.str());
++  return RET_OK;
++}
++
++REG_OPERATOR_CODER(kAllTargets, kNumberTypeInt8, PrimitiveType_Activation, CPUOpCoderCreator<EluInt8Coder>)
++}  // namespace mindspore::lite::micro::nnacl
+diff --git a/mindspore-lite/tools/converter/micro/coder/opcoders/nnacl/int8/elu_int8_coder.h b/mindspore-lite/tools/converter/micro/coder/opcoders/nnacl/int8/elu_int8_coder.h
+new file mode 100644
+index 00000000..ef1bc182
+--- /dev/null
++++ b/mindspore-lite/tools/converter/micro/coder/opcoders/nnacl/int8/elu_int8_coder.h
+@@ -0,0 +1,52 @@
++/**
++ * Copyright 2022 Huawei Technologies Co., Ltd
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ * http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#ifndef MINDSPORE_LITE_TOOLS_CONVERTER_MICRO_CODER_OPCODERS_NNACL_INT8_ELU_INT8_CODER_H_
++#define MINDSPORE_LITE_TOOLS_CONVERTER_MICRO_CODER_OPCODERS_NNACL_INT8_ELU_INT8_CODER_H_
++
++#include <string>
++#include <memory>
++#include <vector>
++#include "coder/opcoders/op_coder.h"
++#include "nnacl_c/int8/quantize.h"
++#include "nnacl_c/int8/elu_int8.h"
++#include "nnacl_c/activation_parameter.h"
++
++namespace mindspore::lite::micro::nnacl {
++
++/**
++ * @brief ELU INT8 Coder for Micro scenario
++ *
++ * 使用 LUT 方案生成代码，适用于嵌入式设备
++ */
++class EluInt8Coder : public OperatorCoder {
++ public:
++  EluInt8Coder(const std::vector<Tensor *> &in_tensors, const std::vector<Tensor *> &out_tensors,
++               const LiteGraph::Node *node, size_t node_index, Target target)
++      : OperatorCoder(in_tensors, out_tensors, node, node_index, target) {}
++
++  ~EluInt8Coder() override = default;
++
++  int Prepare(CoderContext *context) override;
++  int DoCode(CoderContext *const context) override;
++
++ protected:
++  EluInt8QuantArg quant_elu_parm_;
++};
++
++}  // namespace mindspore::lite::micro::nnacl
++
++#endif  // MINDSPORE_LITE_TOOLS_CONVERTER_MICRO_CODER_OPCODERS_NNACL_INT8_ELU_INT8_CODER_H_
+-- 
+2.34.1
+
