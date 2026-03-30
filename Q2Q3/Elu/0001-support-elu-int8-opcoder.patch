@@ -1,4 +1,4 @@
-From cbcc632c489100cbd82ddcb80ab7fb99c2b5e163 Mon Sep 17 00:00:00 2001
+From d2198f5ee52f26d7e33113aa8ac5bb4a11f365dd Mon Sep 17 00:00:00 2001
 From: gupengcheng0401 <gupengcheng4@huawei.com>
 Date: Mon, 30 Mar 2026 15:30:05 +0800
 Subject: [PATCH] support elu-int8 opcoder
@@ -7,11 +7,13 @@ Subject: [PATCH] support elu-int8 opcoder
  cmake/external_libs/flatbuffers.cmake         |   1 +
  cmake/external_libs/opencv.cmake              |   3 +
  mindspore-lite/cmake/lite_dependences.cmake   |   2 +
+ .../litert/kernel/cpu/int8/activation_int8.cc |   4 +
  .../src/litert/kernel/cpu/int8/elu_int8.cc    | 140 ++++++++++++++++++
  .../src/litert/kernel/cpu/int8/elu_int8.h     |  47 ++++++
  .../litert/kernel/cpu/nnacl_c/int8/elu_int8.c |  97 ++++++++++++
  .../litert/kernel/cpu/nnacl_c/int8/elu_int8.h |  58 ++++++++
- 7 files changed, 348 insertions(+)
+ .../litert/kernel/cpu/nnacl_c/int8/quantize.h |   9 ++
+ 9 files changed, 361 insertions(+)
  create mode 100644 mindspore-lite/src/litert/kernel/cpu/int8/elu_int8.cc
  create mode 100644 mindspore-lite/src/litert/kernel/cpu/int8/elu_int8.h
  create mode 100644 mindspore-lite/src/litert/kernel/cpu/nnacl_c/int8/elu_int8.c
@@ -63,6 +65,28 @@ index 2b5f27cd..ddd22a00 100644
      find_package(Python3 COMPONENTS Interpreter Development)
      set(PYTHON_LIBRARIES ${Python3_LIBRARIES})
      message("PYTHON_LIBRARIES: ${PYTHON_LIBRARIES}")
+diff --git a/mindspore-lite/src/litert/kernel/cpu/int8/activation_int8.cc b/mindspore-lite/src/litert/kernel/cpu/int8/activation_int8.cc
+index 9bc410e7..b36592a7 100644
+--- a/mindspore-lite/src/litert/kernel/cpu/int8/activation_int8.cc
++++ b/mindspore-lite/src/litert/kernel/cpu/int8/activation_int8.cc
+@@ -19,6 +19,7 @@
+ #include "src/litert/kernel/cpu/int8/sigmoid_int8.h"
+ #include "src/litert/kernel/cpu/int8/tanh_int8.h"
+ #include "src/litert/kernel/cpu/int8/leaky_relu_int8.h"
++#include "src/litert/kernel/cpu/int8/elu_int8.h"
+ #include "schema/model_generated.h"
+ #include "src/litert/kernel_registry.h"
+ #include "include/errorcode.h"
+@@ -56,6 +57,9 @@ kernel::LiteKernel *CpuActivationInt8KernelCreator(const std::vector<lite::Tenso
+     case schema::ActivationType_LEAKY_RELU:
+       kernel = new (std::nothrow) LeakyReluInt8CPUKernel(parameter, inputs, outputs, ctx);
+       break;
++    case schema::ActivationType_ELU:
++      kernel = new (std::nothrow) EluInt8CPUKernel(parameter, inputs, outputs, ctx);
++      break;
+     case schema::ActivationType_TANH:
+       kernel = new (std::nothrow) TanhInt8CPUKernel(parameter, inputs, outputs, ctx);
+       break;
 diff --git a/mindspore-lite/src/litert/kernel/cpu/int8/elu_int8.cc b/mindspore-lite/src/litert/kernel/cpu/int8/elu_int8.cc
 new file mode 100644
 index 00000000..a63b94e3
@@ -429,6 +453,26 @@ index 00000000..3aa2d234
 +#endif
 +
 +#endif  // NNACL_INT8_ELU_INT8_H_
+diff --git a/mindspore-lite/src/litert/kernel/cpu/nnacl_c/int8/quantize.h b/mindspore-lite/src/litert/kernel/cpu/nnacl_c/int8/quantize.h
+index 380713c5..6a5aa78d 100644
+--- a/mindspore-lite/src/litert/kernel/cpu/nnacl_c/int8/quantize.h
++++ b/mindspore-lite/src/litert/kernel/cpu/nnacl_c/int8/quantize.h
+@@ -167,6 +167,15 @@ typedef struct LeakyReluQuantArg {
+   int thread_num_;
+ } LeakyReluQuantArg;
+ 
++typedef struct EluQuantArg {
++  QuantArg in_args_;
++  QuantArg out_args_;
++  float alpha_;
++  int input_dim_;
++  int element_num;
++  int thread_num_;
++} EluQuantArg;
++
+ typedef struct ResizeQuantArg {
+   int32_t ratio_x_;
+   int32_t ratio_y_;
 -- 
 2.34.1
 
