@@ -1,0 +1,652 @@
+From 4fec6c30331121d72655ee72d588994ac3b715c2 Mon Sep 17 00:00:00 2001
+From: gupengcheng0401 <gupengcheng4@huawei.com>
+Date: Mon, 30 Mar 2026 15:30:05 +0800
+Subject: [PATCH] support elu-int8 opcoder
+
+---
+ cmake/external_libs/flatbuffers.cmake         |   1 +
+ cmake/external_libs/opencv.cmake              |   3 +
+ mindspore-lite/cmake/lite_dependences.cmake   |   2 +
+ .../litert/kernel/cpu/int8/activation_int8.cc |   4 +
+ .../src/litert/kernel/cpu/int8/elu_int8.cc    | 140 ++++++++++++++++++
+ .../src/litert/kernel/cpu/int8/elu_int8.h     |  47 ++++++
+ .../litert/kernel/cpu/nnacl_c/int8/elu_int8.c |  97 ++++++++++++
+ .../litert/kernel/cpu/nnacl_c/int8/elu_int8.h |  58 ++++++++
+ .../litert/kernel/cpu/nnacl_c/int8/quantize.h |   9 ++
+ .../nnacl/int8/activation_int8_coder.cc       |   4 +
+ .../opcoders/nnacl/int8/elu_int8_coder.cc     |  91 ++++++++++++
+ .../opcoders/nnacl/int8/elu_int8_coder.h      |  44 ++++++
+ 12 files changed, 500 insertions(+)
+ create mode 100644 mindspore-lite/src/litert/kernel/cpu/int8/elu_int8.cc
+ create mode 100644 mindspore-lite/src/litert/kernel/cpu/int8/elu_int8.h
+ create mode 100644 mindspore-lite/src/litert/kernel/cpu/nnacl_c/int8/elu_int8.c
+ create mode 100644 mindspore-lite/src/litert/kernel/cpu/nnacl_c/int8/elu_int8.h
+ create mode 100644 mindspore-lite/tools/converter/micro/coder/opcoders/nnacl/int8/elu_int8_coder.cc
+ create mode 100644 mindspore-lite/tools/converter/micro/coder/opcoders/nnacl/int8/elu_int8_coder.h
+
+diff --git a/cmake/external_libs/flatbuffers.cmake b/cmake/external_libs/flatbuffers.cmake
+index 96162bd1..acce75dd 100644
+--- a/cmake/external_libs/flatbuffers.cmake
++++ b/cmake/external_libs/flatbuffers.cmake
+@@ -2,6 +2,7 @@ set(ENABLE_NATIVE_FLATBUFFER "off")
+ if(EXISTS ${TOP_DIR}/mindspore-lite/providers/flatbuffer/native_flatbuffer.cfg)
+     set(ENABLE_NATIVE_FLATBUFFER on)
+ endif()
++set(ENABLE_GITEE on)
+ if(ENABLE_NATIVE_FLATBUFFER)
+     file(STRINGS ${TOP_DIR}/mindspore-lite/providers/flatbuffer/native_flatbuffer.cfg native_flatbuffer_path)
+     #set the flatc path
+diff --git a/cmake/external_libs/opencv.cmake b/cmake/external_libs/opencv.cmake
+index 2f6be152..2841764a 100644
+--- a/cmake/external_libs/opencv.cmake
++++ b/cmake/external_libs/opencv.cmake
+@@ -23,6 +23,7 @@ else()
+     set(opencv_CFLAGS "-fstack-protector-all -Wno-maybe-uninitialized -Wno-unused-parameter -D_FORTIFY_SOURCE=2 -O2")
+     set(opencv_LDFLAGS "-Wl,-z,relro,-z,now,-z,noexecstack -s")
+ endif()
++set(ENABLE_GITEE on)
+ 
+ if(ENABLE_GITEE_EULER)
+     set(GIT_REPOSITORY "https://gitee.com/src-openeuler/opencv.git")
+@@ -152,6 +153,8 @@ else()
+                 -DCV_TRACE=OFF    # cause memory usage increacing
+                 -DWITH_LAPACK=OFF
+                 -DWITH_OPENJPEG=OFF
++                -DCPU_BASELINE=DISABLE_AVX512  # Disable AVX512 to fix Eigen3 compatibility with GCC 9+
++                -DCPU_DISPATCH=      # Disable CPU dispatch optimizations
+                 PATCHES ${TOP_DIR}/third_party/patch/opencv/libtiff/CVE-2024-7006.patch
+                 PATCHES ${TOP_DIR}/third_party/patch/opencv/Fix_Binary.patch)
+ endif()
+diff --git a/mindspore-lite/cmake/lite_dependences.cmake b/mindspore-lite/cmake/lite_dependences.cmake
+index 2b5f27cd..ddd22a00 100644
+--- a/mindspore-lite/cmake/lite_dependences.cmake
++++ b/mindspore-lite/cmake/lite_dependences.cmake
+@@ -32,6 +32,8 @@ if(MSLITE_DEPS_OPENCV)
+ endif()
+ 
+ if(MSLITE_DEPS_PYBIND11)
++    set(Python3_ROOT_DIR "/home/gpc/miniconda3/envs/ms-py39/bin")
++    set(Python3_EXECUTABLE "/home/gpc/miniconda3/envs/ms-py39/bin/python")
+     find_package(Python3 COMPONENTS Interpreter Development)
+     set(PYTHON_LIBRARIES ${Python3_LIBRARIES})
+     message("PYTHON_LIBRARIES: ${PYTHON_LIBRARIES}")
+diff --git a/mindspore-lite/src/litert/kernel/cpu/int8/activation_int8.cc b/mindspore-lite/src/litert/kernel/cpu/int8/activation_int8.cc
+index 9bc410e7..b36592a7 100644
+--- a/mindspore-lite/src/litert/kernel/cpu/int8/activation_int8.cc
++++ b/mindspore-lite/src/litert/kernel/cpu/int8/activation_int8.cc
+@@ -19,6 +19,7 @@
+ #include "src/litert/kernel/cpu/int8/sigmoid_int8.h"
+ #include "src/litert/kernel/cpu/int8/tanh_int8.h"
+ #include "src/litert/kernel/cpu/int8/leaky_relu_int8.h"
++#include "src/litert/kernel/cpu/int8/elu_int8.h"
+ #include "schema/model_generated.h"
+ #include "src/litert/kernel_registry.h"
+ #include "include/errorcode.h"
+@@ -56,6 +57,9 @@ kernel::LiteKernel *CpuActivationInt8KernelCreator(const std::vector<lite::Tenso
+     case schema::ActivationType_LEAKY_RELU:
+       kernel = new (std::nothrow) LeakyReluInt8CPUKernel(parameter, inputs, outputs, ctx);
+       break;
++    case schema::ActivationType_ELU:
++      kernel = new (std::nothrow) EluInt8CPUKernel(parameter, inputs, outputs, ctx);
++      break;
+     case schema::ActivationType_TANH:
+       kernel = new (std::nothrow) TanhInt8CPUKernel(parameter, inputs, outputs, ctx);
+       break;
+diff --git a/mindspore-lite/src/litert/kernel/cpu/int8/elu_int8.cc b/mindspore-lite/src/litert/kernel/cpu/int8/elu_int8.cc
+new file mode 100644
+index 00000000..a63b94e3
+--- /dev/null
++++ b/mindspore-lite/src/litert/kernel/cpu/int8/elu_int8.cc
+@@ -0,0 +1,140 @@
++/**
++ * Copyright 2020 Huawei Technologies Co., Ltd
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ * http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#include "src/litert/kernel/cpu/int8/elu_int8.h"
++#include <limits>
++#include <algorithm>
++#include <cmath>
++#include "nnacl_c/int8/elu_int8.h"
++#include "nnacl_c/int8/quantize.h"
++#include "schema/model_generated.h"
++#include "src/litert/kernel_registry.h"
++#include "include/errorcode.h"
++
++using mindspore::kernel::KERNEL_ARCH;
++using mindspore::lite::KernelRegistrar;
++using mindspore::lite::RET_ERROR;
++using mindspore::lite::RET_OK;
++using mindspore::schema::ActivationType_ELU;
++
++namespace mindspore::kernel {
++namespace {
++int EluInt8Run(void *cdata, int task_id, float, float) {
++  if (cdata == nullptr) {
++    MS_LOG(ERROR) << "input cdata is nullptr!";
++    return RET_ERROR;
++  }
++  auto elu = reinterpret_cast<EluInt8CPUKernel *>(cdata);
++  auto ret = elu->DoExecute(task_id);
++  if (ret != RET_OK) {
++    MS_LOG(ERROR) << "EluInt8Run task_id " << task_id << " failed.";
++    return ret;
++  }
++  return RET_OK;
++}
++}  // namespace
++
++int EluInt8CPUKernel::Prepare() {
++  CHECK_LESS_RETURN(in_tensors_.size(), C1NUM);
++  CHECK_LESS_RETURN(out_tensors_.size(), C1NUM);
++  CHECK_NULL_RETURN(in_tensors_[0]);
++  CHECK_NULL_RETURN(out_tensors_[0]);
++
++  // Validate data types are int8
++  if (in_tensors_[0]->data_type() != mindspore::kNumberTypeInt8 ||
++      out_tensors_[0]->data_type() != mindspore::kNumberTypeInt8) {
++    MS_LOG(ERROR) << "Datatype error, input0 data_type is " << in_tensors_[0]->data_type()
++                  << ", output data_type is " << out_tensors_[0]->data_type();
++    return RET_ERROR;
++  }
++
++  // Get input quantization parameters
++  auto *input_tensor = in_tensors_.at(kInputIndex);
++  auto in_quant_args = input_tensor->quant_params();
++  MS_CHECK_TRUE_MSG(!in_quant_args.empty(), RET_ERROR, "Input quant param cannot be empty.");
++  quant_elu_parm_.in_args_.scale_ = static_cast<float>(in_quant_args.front().scale);
++  quant_elu_parm_.in_args_.zp_ = in_quant_args.front().zeroPoint;
++
++  // Get output quantization parameters
++  auto *out_tensor = out_tensors_.at(kOutputIndex);
++  auto out_quant_args = out_tensor->quant_params();
++  MS_CHECK_TRUE_MSG(!out_quant_args.empty(), RET_ERROR, "Output quant param cannot be empty.");
++  quant_elu_parm_.out_args_.scale_ = static_cast<float>(out_quant_args.front().scale);
++  quant_elu_parm_.out_args_.zp_ = out_quant_args.front().zeroPoint;
++
++  // Get alpha parameter from activation parameter (default to 1.0 if not specified)
++  auto *activation_param = reinterpret_cast<ActivationParameter *>(op_parameter_);
++  quant_elu_parm_.alpha_ = (activation_param->alpha_ > 0.0f) ? activation_param->alpha_ : 1.0f;
++
++  // Initialize the lookup table
++  auto ret = EluInt8InitLUT(&quant_elu_parm_, table_list_);
++  if (ret != RET_OK) {
++    MS_LOG(ERROR) << "EluInt8InitLUT failed.";
++    return ret;
++  }
++
++  if (!InferShapeDone()) {
++    return RET_OK;
++  }
++  return ReSize();
++}
++
++int EluInt8CPUKernel::ReSize() {
++  auto *input_tensor = in_tensors_.at(kInputIndex);
++  MS_CHECK_GT(input_tensor->ElementsNum(), 0, RET_ERROR);
++  quant_elu_parm_.element_num = input_tensor->ElementsNum();
++  quant_elu_parm_.thread_num_ = op_parameter_->thread_num_;
++  return RET_OK;
++}
++
++int EluInt8CPUKernel::Run() {
++  auto ret = ParallelLaunch(this->ms_context_, EluInt8Run, this, op_parameter_->thread_num_);
++  if (ret != RET_OK) {
++    MS_LOG(ERROR) << "Run EluInt8 failed. errorcode: " << ret;
++  }
++  return ret;
++}
++
++int EluInt8CPUKernel::DoExecute(int task_id) {
++  auto input_tensor = in_tensors_.at(kInputIndex);
++  auto out_tensor = out_tensors_.at(kOutputIndex);
++
++  int8_t *input_data = reinterpret_cast<int8_t *>(input_tensor->data());
++  int8_t *output_data = reinterpret_cast<int8_t *>(out_tensor->data());
++  MS_ASSERT(input_data);
++  MS_ASSERT(output_data);
++
++  // Calculate work distribution for this thread
++  auto length = input_tensor->ElementsNum();
++  int stride = UP_DIV(length, op_parameter_->thread_num_);
++  int count = MSMIN(stride, length - stride * task_id);
++  int offset = stride * task_id;
++
++  if (count <= 0) {
++    return RET_OK;
++  }
++
++  // Apply ELu using the pre-computed lookup table
++  auto ret = EluInt8(input_data + offset, count, output_data + offset, table_list_);
++  if (ret != RET_OK) {
++    MS_LOG(ERROR) << "EluInt8 failed";
++    return RET_ERROR;
++  }
++  return RET_OK;
++}
++
++REG_KERNEL(kCPU, kNumberTypeInt8, PrimitiveType_Activation, LiteKernelCreator<EluInt8CPUKernel>)
++}  // namespace mindspore::kernel
+diff --git a/mindspore-lite/src/litert/kernel/cpu/int8/elu_int8.h b/mindspore-lite/src/litert/kernel/cpu/int8/elu_int8.h
+new file mode 100644
+index 00000000..19726d54
+--- /dev/null
++++ b/mindspore-lite/src/litert/kernel/cpu/int8/elu_int8.h
+@@ -0,0 +1,47 @@
++/**
++ * Copyright 2020 Huawei Technologies Co., Ltd
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ * http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#ifndef MINDSPORE_LITE_SRC_RUNTIME_KERNEL_CPU_INT8_ELU_INT8_H_
++#define MINDSPORE_LITE_SRC_RUNTIME_KERNEL_CPU_INT8_ELU_INT8_H_
++
++#include <vector>
++#include <limits>
++#include "include/errorcode.h"
++#include "nnacl_c/fp32/activation_fp32.h"
++#include "nnacl_c/int8/elu_int8.h"
++#include "src/litert/lite_kernel.h"
++
++namespace mindspore::kernel {
++class EluInt8CPUKernel : public LiteKernel {
++ public:
++  EluInt8CPUKernel(OpParameter *parameter, const std::vector<lite::Tensor *> &inputs,
++                   const std::vector<lite::Tensor *> &outputs, const lite::InnerContext *ctx)
++      : LiteKernel(parameter, inputs, outputs, ctx) {}
++  ~EluInt8CPUKernel() override = default;
++
++  int Prepare() override;
++  int ReSize() override;
++  int Run() override;
++  int DoExecute(int task_id);
++
++ private:
++  // 256-entry lookup table for ELu activation
++  int8_t table_list_[256]{0};
++  EluQuantArg quant_elu_parm_ = {};
++};
++}  // namespace mindspore::kernel
++
++#endif  // MINDSPORE_LITE_SRC_RUNTIME_KERNEL_CPU_INT8_ELU_INT8_H_
+diff --git a/mindspore-lite/src/litert/kernel/cpu/nnacl_c/int8/elu_int8.c b/mindspore-lite/src/litert/kernel/cpu/nnacl_c/int8/elu_int8.c
+new file mode 100644
+index 00000000..7c6ee469
+--- /dev/null
++++ b/mindspore-lite/src/litert/kernel/cpu/nnacl_c/int8/elu_int8.c
+@@ -0,0 +1,97 @@
++/**
++ * Copyright 2020 Huawei Technologies Co., Ltd
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ * http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#include "nnacl_c/int8/elu_int8.h"
++#include <math.h>
++#include <limits.h>
++#include "nnacl_c/errorcode.h"
++
++/**
++ * Initialize ELu lookup table
++ *
++ * This function pre-computes the ELu output for all 256 possible int8 input values.
++ * The ELu formula is: y = x > 0 ? x : alpha * (exp(x) - 1)
++ *
++ * For each possible int8 input value (-128 to 127):
++ * 1. Dequantize to float: real_value = in_scale * (i - in_zp)
++ * 2. Apply ELu transform: transformed = real_value > 0 ? real_value : alpha * (exp(real_value) - 1)
++ * 3. Requantize to output: output = round(transformed / out_scale) + out_zp
++ * 4. Clip to int8 range and store in table
++ */
++int EluInt8InitLUT(const EluQuantArg *quant_elu_param, int8_t *table) {
++  if (quant_elu_param == NULL || table == NULL) {
++    return NNACL_NULL_PTR;
++  }
++
++  const float in_scale = quant_elu_param->in_args_.scale_;
++  const int32_t in_zp = quant_elu_param->in_args_.zp_;
++  const float out_scale = quant_elu_param->out_args_.scale_;
++  const int32_t out_zp = quant_elu_param->out_args_.zp_;
++  const float alpha = quant_elu_param->alpha_;
++  const float output_inverse_scale = 1.0f / out_scale;
++
++  const int32_t min_val = SCHAR_MIN;  // -128
++  const int32_t max_val = SCHAR_MAX;  // 127
++
++  // Iterate through all 256 possible int8 input values
++  for (int32_t i = min_val; i <= max_val; ++i) {
++    // Step 1: Dequantize input to float
++    const float real_input = in_scale * (i - in_zp);
++
++    // Step 2: Apply ELu transform
++    // ELu formula: y = x > 0 ? x : alpha * (exp(x) - 1)
++    float transformed;
++    if (real_input > 0.0f) {
++      transformed = real_input;
++    } else {
++      // For negative inputs: alpha * (exp(x) - 1)
++      transformed = alpha * (expf(real_input) - 1.0f);
++    }
++
++    // Step 3: Requantize to output scale
++    const float rescaled = roundf(transformed * output_inverse_scale);
++    int32_t quantized = (int32_t)(rescaled + out_zp);
++
++    // Step 4: Clip to valid int8 range
++    quantized = quantized > max_val ? max_val : quantized;
++    quantized = quantized < min_val ? min_val : quantized;
++
++    // Store in lookup table using unsigned index
++    table[(uint8_t)i] = (int8_t)quantized;
++  }
++
++  return NNACL_OK;
++}
++
++/**
++ * Apply ELu activation using lookup table
++ *
++ * This is the runtime function - very fast as it's just table lookups.
++ * No floating-point operations, no exp() calls at runtime.
++ */
++int EluInt8(const int8_t *src, int length, int8_t *dst, const int8_t *table) {
++  if (src == NULL || dst == NULL || table == NULL) {
++    return NNACL_NULL_PTR;
++  }
++
++  // For each element, use the input value as an index into the lookup table
++  // Cast to uint8_t ensures proper indexing for negative values
++  for (int i = 0; i < length; ++i) {
++    dst[i] = table[(uint8_t)src[i]];
++  }
++
++  return NNACL_OK;
++}
+diff --git a/mindspore-lite/src/litert/kernel/cpu/nnacl_c/int8/elu_int8.h b/mindspore-lite/src/litert/kernel/cpu/nnacl_c/int8/elu_int8.h
+new file mode 100644
+index 00000000..3aa2d234
+--- /dev/null
++++ b/mindspore-lite/src/litert/kernel/cpu/nnacl_c/int8/elu_int8.h
+@@ -0,0 +1,58 @@
++/**
++ * Copyright 2020 Huawei Technologies Co., Ltd
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ * http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#ifndef NNACL_INT8_ELU_INT8_H_
++#define NNACL_INT8_ELU_INT8_H_
++
++#include "nnacl_c/op_base.h"
++#include "nnacl_c/int8/quantize.h"
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++/**
++ * @brief Initialize ELu lookup table
++ *
++ * Pre-computes the ELu lookup table for all 256 possible int8 input values.
++ * Uses the formula: y = x > 0 ? x : alpha * (exp(x) - 1)
++ *
++ * @param quant_elu_param Pointer to EluQuantArg containing quantization parameters
++ * @param table Output array of 256 int8_t values (the lookup table)
++ * @return NNACL_OK on success, error code otherwise
++ */
++int EluInt8InitLUT(const EluQuantArg *quant_elu_param, int8_t *table);
++
++/**
++ * @brief Apply ELu activation using lookup table
++ *
++ * For each input element, uses its value as an index into the pre-computed
++ * lookup table to get the output value. This is O(1) per element with no
++ * floating-point operations at runtime.
++ *
++ * @param src Input int8 tensor data
++ * @param length Number of elements to process
++ * @param dst Output int8 tensor data
++ * @param table Pre-computed lookup table (256 entries)
++ * @return NNACL_OK on success
++ */
++int EluInt8(const int8_t *src, int length, int8_t *dst, const int8_t *table);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif  // NNACL_INT8_ELU_INT8_H_
+diff --git a/mindspore-lite/src/litert/kernel/cpu/nnacl_c/int8/quantize.h b/mindspore-lite/src/litert/kernel/cpu/nnacl_c/int8/quantize.h
+index 380713c5..6a5aa78d 100644
+--- a/mindspore-lite/src/litert/kernel/cpu/nnacl_c/int8/quantize.h
++++ b/mindspore-lite/src/litert/kernel/cpu/nnacl_c/int8/quantize.h
+@@ -167,6 +167,15 @@ typedef struct LeakyReluQuantArg {
+   int thread_num_;
+ } LeakyReluQuantArg;
+ 
++typedef struct EluQuantArg {
++  QuantArg in_args_;
++  QuantArg out_args_;
++  float alpha_;
++  int input_dim_;
++  int element_num;
++  int thread_num_;
++} EluQuantArg;
++
+ typedef struct ResizeQuantArg {
+   int32_t ratio_x_;
+   int32_t ratio_y_;
+diff --git a/mindspore-lite/tools/converter/micro/coder/opcoders/nnacl/int8/activation_int8_coder.cc b/mindspore-lite/tools/converter/micro/coder/opcoders/nnacl/int8/activation_int8_coder.cc
+index 38cd39b2..ef0ff8b4 100644
+--- a/mindspore-lite/tools/converter/micro/coder/opcoders/nnacl/int8/activation_int8_coder.cc
++++ b/mindspore-lite/tools/converter/micro/coder/opcoders/nnacl/int8/activation_int8_coder.cc
+@@ -22,6 +22,7 @@
+ #include "schema/model_generated.h"
+ #include "src/common/version_manager.h"
+ #include "coder/opcoders/nnacl/int8/leaky_relu_int8_coder.h"
++#include "coder/opcoders/nnacl/int8/elu_int8_coder.h"
+ 
+ using mindspore::schema::PrimitiveType_Activation;
+ 
+@@ -66,6 +67,9 @@ std::unique_ptr<OperatorCoder> CPUActivationINT8CoderCreator(const std::vector<T
+     case schema::ActivationType_LEAKY_RELU:
+       coder = CPUOpCoderCreator<LeakyReluInt8Coder>(in_tensors, out_tensors, node, node_index, target, schema_version);
+       break;
++    case schema::ActivationType_ELU:
++      coder = CPUOpCoderCreator<EluInt8Coder>(in_tensors, out_tensors, node, node_index, target, schema_version);
++      break;
+     default:
+       break;
+   }
+diff --git a/mindspore-lite/tools/converter/micro/coder/opcoders/nnacl/int8/elu_int8_coder.cc b/mindspore-lite/tools/converter/micro/coder/opcoders/nnacl/int8/elu_int8_coder.cc
+new file mode 100644
+index 00000000..e3c8c04a
+--- /dev/null
++++ b/mindspore-lite/tools/converter/micro/coder/opcoders/nnacl/int8/elu_int8_coder.cc
+@@ -0,0 +1,91 @@
++/**
++ * Copyright 2022 Huawei Technologies Co., Ltd
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ * http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#include "coder/opcoders/nnacl/int8/elu_int8_coder.h"
++#include <limits>
++#include <algorithm>
++#include "coder/log.h"
++#include "include/errorcode.h"
++#include "coder/opcoders/file_collector.h"
++#include "coder/opcoders/serializers/nnacl_serializer/nnacl_int8_serializer.h"
++#include "nnacl_c/fp32/activation_fp32.h"
++
++namespace mindspore::lite::micro::nnacl {
++constexpr auto kInt8Range = 256;
++
++void CalculateEluTableList(int8_t *table, const float input_scale, const int32_t input_zp,
++                           const float output_scale, const int32_t output_zp, const float alpha) {
++  constexpr int32_t min_value = std::numeric_limits<int8_t>::min();
++  constexpr int32_t max_value = std::numeric_limits<int8_t>::max();
++
++  for (int i = min_value; i <= max_value; ++i) {
++    // Dequantize input to float
++    const float real_input = input_scale * (i - input_zp);
++
++    // Apply ELu transform: y = x > 0 ? x : alpha * (exp(x) - 1)
++    float transformed;
++    if (real_input > 0.0f) {
++      transformed = real_input;
++    } else {
++      transformed = alpha * (std::exp(real_input) - 1.0f);
++    }
++
++    // Requantize to output scale
++    const int32_t quantized = static_cast<int32_t>(std::round(transformed / output_scale) + output_zp);
++    auto out_value = static_cast<int8_t>(std::max(std::min(quantized, max_value), min_value));
++    auto index = static_cast<uint8_t>(i);
++    table[index] = out_value;
++  }
++}
++
++int EluInt8Coder::Prepare(CoderContext *const context) {
++  table_list_ = static_cast<int8_t *>(allocator_->Malloc(kNumberTypeInt8, kInt8Range, kOfflinePackWeight));
++  MS_CHECK_PTR(table_list_);
++
++  const float input_scale = input_tensor_->quant_params().at(0).scale;
++  const int32_t input_zp = input_tensor_->quant_params().at(0).zeroPoint;
++  const float output_scale = output_tensor_->quant_params().at(0).scale;
++  const int32_t output_zp = output_tensor_->quant_params().at(0).zeroPoint;
++
++  // Get alpha parameter from activation parameter
++  auto *activation_param = reinterpret_cast<ActivationParameter *>(parameter_);
++  const float alpha = (activation_param->alpha_ > 0.0f) ? activation_param->alpha_ : 1.0f;
++
++  CalculateEluTableList(table_list_, input_scale, input_zp, output_scale, output_zp, alpha);
++  return RET_OK;
++}
++
++int EluInt8Coder::DoCode(CoderContext *const context) {
++  Collect(context,
++          {
++            "nnacl_c/int8/elu_int8.h",
++          },
++          {
++            "elu_int8.c",
++          });
++
++  NNaclInt8Serializer code;
++
++  int length = static_cast<int>(input_tensor_->ElementsNum());
++  code.CodeFunction("EluInt8", input_tensor_, length, output_tensor_, table_list_);
++
++  context->AppendCode(code.str());
++
++  return RET_OK;
++}
++
++REG_OPERATOR_CODER(kAllTargets, kNumberTypeInt8, PrimitiveType_ELU, CPUOpCoderCreator<EluInt8Coder>)
++}  // namespace mindspore::lite::micro::nnacl
+diff --git a/mindspore-lite/tools/converter/micro/coder/opcoders/nnacl/int8/elu_int8_coder.h b/mindspore-lite/tools/converter/micro/coder/opcoders/nnacl/int8/elu_int8_coder.h
+new file mode 100644
+index 00000000..7edbb94f
+--- /dev/null
++++ b/mindspore-lite/tools/converter/micro/coder/opcoders/nnacl/int8/elu_int8_coder.h
+@@ -0,0 +1,44 @@
++/**
++ * Copyright 2022 Huawei Technologies Co., Ltd
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ * http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++#ifndef MINDSPORE_LITE_TOOLS_CONVERTER_MICRO_CODER_OPCODERS_NNACL_INT8_ELU_INT8_CODER_H_
++#define MINDSPORE_LITE_TOOLS_CONVERTER_MICRO_CODER_OPCODERS_NNACL_INT8_ELU_INT8_CODER_H_
++
++#include <string>
++#include <memory>
++#include <vector>
++#include "coder/opcoders/op_coder.h"
++#include "nnacl_c/int8/quantize.h"
++#include "nnacl_c/int8/elu_int8.h"
++#include "nnacl_c/activation_parameter.h"
++
++namespace mindspore::lite::micro::nnacl {
++class EluInt8Coder final : public OperatorCoder {
++ public:
++  EluInt8Coder(const std::vector<Tensor *> &in_tensors, const std::vector<Tensor *> &out_tensors,
++               const LiteGraph::Node *node, size_t node_index, Target target)
++      : OperatorCoder(in_tensors, out_tensors, node, node_index, target) {}
++
++  ~EluInt8Coder() override = default;
++
++  int Prepare(CoderContext *context) override;
++  int DoCode(CoderContext *const context) override;
++
++ private:
++  int8_t *table_list_{nullptr};
++  EluQuantArg quant_elu_parm_ = {};
++};
++}  // namespace mindspore::lite::micro::nnacl
++#endif  // MINDSPORE_LITE_TOOLS_CONVERTER_MICRO_CODER_OPCODERS_NNACL_INT8_ELU_INT8_CODER_H_
+-- 
+2.34.1
+
