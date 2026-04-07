@@ -1,16 +1,56 @@
-From 31402316e1d33c5657dee1f6dc40743c8c5f1548 Mon Sep 17 00:00:00 2001
+From 94c91124af4c1486214dcf4d973500d273843cda Mon Sep 17 00:00:00 2001
 From: gupengcheng0401 <gupengcheng4@huawei.com>
 Date: Tue, 7 Apr 2026 11:45:07 +0800
 Subject: [PATCH] support erf fp32&&int8 opcoder
 
 ---
+ .../ops/populate/arithmetic_self_populate.cc  |  2 ++
+ .../src/common/ops/populate/erf_populate.cc   | 10 ++--------
  .../kernel/cpu/int8/arithmetic_self_int8.cc   |  1 +
  .../kernel/cpu/int8/arithmetic_self_int8.h    |  4 ++++
  .../cpu/nnacl_c/int8/arithmetic_self_int8.c   | 19 +++++++++++++++++++
  .../cpu/nnacl_c/int8/arithmetic_self_int8.h   |  2 ++
  .../nnacl/int8/arithmetic_self_int8_coder.cc  |  5 +++++
- 5 files changed, 31 insertions(+)
+ 7 files changed, 35 insertions(+), 8 deletions(-)
 
+diff --git a/mindspore-lite/src/common/ops/populate/arithmetic_self_populate.cc b/mindspore-lite/src/common/ops/populate/arithmetic_self_populate.cc
+index 69e3725b..4b37e878 100644
+--- a/mindspore-lite/src/common/ops/populate/arithmetic_self_populate.cc
++++ b/mindspore-lite/src/common/ops/populate/arithmetic_self_populate.cc
+@@ -19,6 +19,7 @@
+ using mindspore::schema::PrimitiveType_Abs;
+ using mindspore::schema::PrimitiveType_Ceil;
+ using mindspore::schema::PrimitiveType_Cos;
++using mindspore::schema::PrimitiveType_Erf;
+ using mindspore::schema::PrimitiveType_Floor;
+ using mindspore::schema::PrimitiveType_Log;
+ using mindspore::schema::PrimitiveType_LogGrad;
+@@ -64,5 +65,6 @@ REG_POPULATE(PrimitiveType_Floor, PopulateArithmeticSelf, SCHEMA_CUR)
+ REG_POPULATE(PrimitiveType_Ceil, PopulateArithmeticSelf, SCHEMA_CUR)
+ REG_POPULATE(PrimitiveType_Round, PopulateArithmeticSelf, SCHEMA_CUR)
+ REG_POPULATE(PrimitiveType_Reciprocal, PopulateArithmeticSelf, SCHEMA_CUR)
++REG_POPULATE(PrimitiveType_Erf, PopulateArithmeticSelf, SCHEMA_CUR)
+ }  // namespace lite
+ }  // namespace mindspore
+diff --git a/mindspore-lite/src/common/ops/populate/erf_populate.cc b/mindspore-lite/src/common/ops/populate/erf_populate.cc
+index fb22606f..6849a44d 100644
+--- a/mindspore-lite/src/common/ops/populate/erf_populate.cc
++++ b/mindspore-lite/src/common/ops/populate/erf_populate.cc
+@@ -13,12 +13,6 @@
+  * See the License for the specific language governing permissions and
+  * limitations under the License.
+  */
+-#include "src/common/ops/populate/populate_register.h"
+-#include "src/common/ops/populate/default_populate.h"
+-using mindspore::schema::PrimitiveType_Erf;
+ 
+-namespace mindspore {
+-namespace lite {
+-REG_POPULATE(PrimitiveType_Erf, DefaultPopulateParameter, SCHEMA_CUR)
+-}  // namespace lite
+-}  // namespace mindspore
++// Erf populate is registered in arithmetic_self_populate.cc with PopulateArithmeticSelf
++// to ensure correct ArithmeticSelfParameter allocation (includes ArithSelfQuantArg).
 diff --git a/mindspore-lite/src/litert/kernel/cpu/int8/arithmetic_self_int8.cc b/mindspore-lite/src/litert/kernel/cpu/int8/arithmetic_self_int8.cc
 index 7ae17cf5..690cc0b1 100644
 --- a/mindspore-lite/src/litert/kernel/cpu/int8/arithmetic_self_int8.cc
