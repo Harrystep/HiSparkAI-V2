@@ -1,0 +1,119 @@
+From 31402316e1d33c5657dee1f6dc40743c8c5f1548 Mon Sep 17 00:00:00 2001
+From: gupengcheng0401 <gupengcheng4@huawei.com>
+Date: Tue, 7 Apr 2026 11:45:07 +0800
+Subject: [PATCH] support erf fp32&&int8 opcoder
+
+---
+ .../kernel/cpu/int8/arithmetic_self_int8.cc   |  1 +
+ .../kernel/cpu/int8/arithmetic_self_int8.h    |  4 ++++
+ .../cpu/nnacl_c/int8/arithmetic_self_int8.c   | 19 +++++++++++++++++++
+ .../cpu/nnacl_c/int8/arithmetic_self_int8.h   |  2 ++
+ .../nnacl/int8/arithmetic_self_int8_coder.cc  |  5 +++++
+ 5 files changed, 31 insertions(+)
+
+diff --git a/mindspore-lite/src/litert/kernel/cpu/int8/arithmetic_self_int8.cc b/mindspore-lite/src/litert/kernel/cpu/int8/arithmetic_self_int8.cc
+index 7ae17cf5..690cc0b1 100644
+--- a/mindspore-lite/src/litert/kernel/cpu/int8/arithmetic_self_int8.cc
++++ b/mindspore-lite/src/litert/kernel/cpu/int8/arithmetic_self_int8.cc
+@@ -139,4 +139,5 @@ REG_KERNEL(kCPU, kNumberTypeInt8, PrimitiveType_Square, LiteKernelCreator<Arithm
+ REG_KERNEL(kCPU, kNumberTypeInt8, PrimitiveType_ExpFusion, LiteKernelCreator<ArithmeticSelfInt8CPUKernel>)
+ REG_KERNEL(kCPU, kNumberTypeInt8, PrimitiveType_LogicalNot, LiteKernelCreator<ArithmeticSelfInt8CPUKernel>)
+ REG_KERNEL(kCPU, kNumberTypeInt8, PrimitiveType_Reciprocal, LiteKernelCreator<ArithmeticSelfInt8CPUKernel>)
++REG_KERNEL(kCPU, kNumberTypeInt8, PrimitiveType_Erf, LiteKernelCreator<ArithmeticSelfInt8CPUKernel>)
+ }  // namespace mindspore::kernel
+diff --git a/mindspore-lite/src/litert/kernel/cpu/int8/arithmetic_self_int8.h b/mindspore-lite/src/litert/kernel/cpu/int8/arithmetic_self_int8.h
+index a1b8e196..0e58eb51 100644
+--- a/mindspore-lite/src/litert/kernel/cpu/int8/arithmetic_self_int8.h
++++ b/mindspore-lite/src/litert/kernel/cpu/int8/arithmetic_self_int8.h
+@@ -27,6 +27,7 @@ using mindspore::lite::InnerContext;
+ using mindspore::schema::PrimitiveType_Abs;
+ using mindspore::schema::PrimitiveType_Ceil;
+ using mindspore::schema::PrimitiveType_Cos;
++using mindspore::schema::PrimitiveType_Erf;
+ using mindspore::schema::PrimitiveType_ExpFusion;
+ using mindspore::schema::PrimitiveType_Floor;
+ using mindspore::schema::PrimitiveType_Log;
+@@ -86,6 +87,9 @@ class ArithmeticSelfInt8CPUKernel : public LiteKernel {
+       case PrimitiveType_Reciprocal:
+         arithmeticSelf_run_ = Int8ElementReciprocal;
+         break;
++      case PrimitiveType_Erf:
++        arithmeticSelf_run_ = Int8ElementErf;
++        break;
+       default:
+         break;
+     }
+diff --git a/mindspore-lite/src/litert/kernel/cpu/nnacl_c/int8/arithmetic_self_int8.c b/mindspore-lite/src/litert/kernel/cpu/nnacl_c/int8/arithmetic_self_int8.c
+index 31cdc2e9..bd378d68 100644
+--- a/mindspore-lite/src/litert/kernel/cpu/nnacl_c/int8/arithmetic_self_int8.c
++++ b/mindspore-lite/src/litert/kernel/cpu/nnacl_c/int8/arithmetic_self_int8.c
+@@ -221,6 +221,25 @@ int Int8ElementRsqrt(const int8_t *input, int8_t *output, int element_size, Arit
+   return NNACL_OK;
+ }
+ 
++int Int8ElementErf(const int8_t *input, int8_t *output, int element_size, ArithSelfQuantArg para) {
++  float in_scale = para.in_args_.scale_;
++  int32_t in_zp = para.in_args_.zp_;
++  float out_scale = para.out_args_.scale_;
++  int32_t out_zp = para.out_args_.zp_;
++  float bias = in_zp * in_scale;
++  for (int i = 0; i < element_size; i++) {
++    int32_t output_tmp = round(erff(input[i] * in_scale + bias) / out_scale) + out_zp;
++    if (output_tmp > para.output_activation_max_) {
++      output[i] = para.output_activation_max_;
++    } else if (output_tmp < para.output_activation_min_) {
++      output[i] = para.output_activation_min_;
++    } else {
++      output[i] = (int8_t)output_tmp;
++    }
++  }
++  return NNACL_OK;
++}
++
+ #ifdef ENABLE_NEON
+ 
+ int16x4_t ClacSumHalfWord(int32x4_t scaled_input, int32x4_t left_shift_out_vec, int32x4_t output_multiplier_vec,
+diff --git a/mindspore-lite/src/litert/kernel/cpu/nnacl_c/int8/arithmetic_self_int8.h b/mindspore-lite/src/litert/kernel/cpu/nnacl_c/int8/arithmetic_self_int8.h
+index 56c67388..123d90b1 100644
+--- a/mindspore-lite/src/litert/kernel/cpu/nnacl_c/int8/arithmetic_self_int8.h
++++ b/mindspore-lite/src/litert/kernel/cpu/nnacl_c/int8/arithmetic_self_int8.h
+@@ -54,6 +54,8 @@ int Int8ElementLogicalNot(const int8_t *input, int8_t *output, int element_size,
+ 
+ int Int8ElementReciprocal(const int8_t *input, int8_t *output, int element_size, ArithSelfQuantArg para);
+ 
++int Int8ElementErf(const int8_t *input, int8_t *output, int element_size, ArithSelfQuantArg para);
++
+ #ifdef __cplusplus
+ }
+ #endif
+diff --git a/mindspore-lite/tools/converter/micro/coder/opcoders/nnacl/int8/arithmetic_self_int8_coder.cc b/mindspore-lite/tools/converter/micro/coder/opcoders/nnacl/int8/arithmetic_self_int8_coder.cc
+index c4885ec6..b8cc655f 100644
+--- a/mindspore-lite/tools/converter/micro/coder/opcoders/nnacl/int8/arithmetic_self_int8_coder.cc
++++ b/mindspore-lite/tools/converter/micro/coder/opcoders/nnacl/int8/arithmetic_self_int8_coder.cc
+@@ -29,6 +29,7 @@ using mindspore::schema::PrimitiveType_ExpFusion;
+ using mindspore::schema::PrimitiveType_Floor;
+ using mindspore::schema::PrimitiveType_Log;
+ using mindspore::schema::PrimitiveType_LogicalNot;
++using mindspore::schema::PrimitiveType_Erf;
+ using mindspore::schema::PrimitiveType_Reciprocal;
+ using mindspore::schema::PrimitiveType_Round;
+ using mindspore::schema::PrimitiveType_Rsqrt;
+@@ -108,6 +109,9 @@ int ArithmeticSelfInt8Coder::Prepare(CoderContext *context) {
+     case PrimitiveType_Reciprocal:
+       arithmeticSelf_run_ = "Int8ElementReciprocal";
+       break;
++    case PrimitiveType_Erf:
++      arithmeticSelf_run_ = "Int8ElementErf";
++      break;
+     default:
+       MS_LOG(ERROR) << "Unknown op type " << parameter_->type_;
+       return RET_ERROR;
+@@ -146,4 +150,5 @@ REG_OPERATOR_CODER(kAllTargets, kNumberTypeInt8, PrimitiveType_Rsqrt, CPUOpCoder
+ REG_OPERATOR_CODER(kAllTargets, kNumberTypeInt8, PrimitiveType_Square, CPUOpCoderCreator<ArithmeticSelfInt8Coder>)
+ REG_OPERATOR_CODER(kAllTargets, kNumberTypeInt8, PrimitiveType_LogicalNot, CPUOpCoderCreator<ArithmeticSelfInt8Coder>)
+ REG_OPERATOR_CODER(kAllTargets, kNumberTypeInt8, PrimitiveType_Reciprocal, CPUOpCoderCreator<ArithmeticSelfInt8Coder>)
++REG_OPERATOR_CODER(kAllTargets, kNumberTypeInt8, PrimitiveType_Erf, CPUOpCoderCreator<ArithmeticSelfInt8Coder>)
+ }  // namespace mindspore::lite::micro::nnacl
+-- 
+2.34.1
+
