@@ -1,4 +1,4 @@
-From 9ae5b3b6d43e78d99ed50432ebe97ac3a1ccc901 Mon Sep 17 00:00:00 2001
+From 4abb9cdf755db5ce7c60da71b1944b609d4308ad Mon Sep 17 00:00:00 2001
 From: gupengcheng0401 <gupengcheng4@huawei.com>
 Date: Wed, 8 Apr 2026 14:32:17 +0800
 Subject: [PATCH] support celu fp32&&int8 opcoder
@@ -10,15 +10,20 @@ Subject: [PATCH] support celu fp32&&int8 opcoder
  .../litert/kernel/cpu/int8/activation_int8.cc |   4 +
  .../src/litert/kernel/cpu/int8/celu_int8.cc   | 116 ++++++++++++++++++
  .../src/litert/kernel/cpu/int8/celu_int8.h    |  43 +++++++
+ .../kernel/cpu/nnacl_c/fp32/activation_fp32.c |   4 +-
+ .../kernel/cpu/nnacl_c/fp32/activation_fp32.h |   2 +-
  .../kernel/cpu/nnacl_c/int8/celu_int8.c       |  26 ++++
  .../kernel/cpu/nnacl_c/int8/celu_int8.h       |  33 +++++
  .../kernel/cpu/nnacl_c/kernel/activation.c    |   5 +-
- .../src/litert/kernel/cpu/nnacl_c/op_base.h   |   3 +-
+ .../src/litert/kernel/cpu/nnacl_c/op_base.h   |  16 +--
  .../converter/import/primitive_adjust.cc      |   7 +-
+ .../nnacl/fp32/activation_fp32_coder.cc       |   3 +
  .../nnacl/int8/activation_int8_coder.cc       |   4 +
  .../opcoders/nnacl/int8/celu_int8_coder.cc    |  82 +++++++++++++
  .../opcoders/nnacl/int8/celu_int8_coder.h     |  42 +++++++
- 14 files changed, 373 insertions(+), 9 deletions(-)
+ .../parser/onnx/onnx_activation_parser.cc     |   3 +-
+ .../quantizer/full_quant_quantizer.cc         |   3 +
+ 19 files changed, 388 insertions(+), 22 deletions(-)
  create mode 100644 mindspore-lite/src/litert/kernel/cpu/int8/celu_int8.cc
  create mode 100644 mindspore-lite/src/litert/kernel/cpu/int8/celu_int8.h
  create mode 100644 mindspore-lite/src/litert/kernel/cpu/nnacl_c/int8/celu_int8.c
@@ -296,6 +301,41 @@ index 00000000..95bb0ab4
 +}  // namespace mindspore::kernel
 +
 +#endif  // MINDSPORE_LITE_SRC_RUNTIME_KERNEL_CPU_INT8_CELU_INT8_H_
+diff --git a/mindspore-lite/src/litert/kernel/cpu/nnacl_c/fp32/activation_fp32.c b/mindspore-lite/src/litert/kernel/cpu/nnacl_c/fp32/activation_fp32.c
+index f284b75a..ebec9d87 100644
+--- a/mindspore-lite/src/litert/kernel/cpu/nnacl_c/fp32/activation_fp32.c
++++ b/mindspore-lite/src/litert/kernel/cpu/nnacl_c/fp32/activation_fp32.c
+@@ -248,7 +248,7 @@ int Elu(const float *src, int length, float *dst, float alpha) {
+   return NNACL_OK;
+ }
+ 
+-void Celu(const float *src, int length, float *dst, float alpha) {
++int Celu(const float *src, int length, float *dst, float alpha) {
+   int i = 0;
+ 
+   SIMD_RUN_NO_SCALAR(Celu, i, src, length, dst, alpha);
+@@ -256,7 +256,7 @@ void Celu(const float *src, int length, float *dst, float alpha) {
+   for (; i < length; ++i) {
+     dst[i] = src[i] > 0 ? src[i] : (expm1(src[i] / alpha) * alpha);
+   }
+-  return;
++  return NNACL_OK;
+ }
+ 
+ int HardShrink(const float *src, int length, float *dst, float lambd) {
+diff --git a/mindspore-lite/src/litert/kernel/cpu/nnacl_c/fp32/activation_fp32.h b/mindspore-lite/src/litert/kernel/cpu/nnacl_c/fp32/activation_fp32.h
+index 28a3da19..0f121e29 100644
+--- a/mindspore-lite/src/litert/kernel/cpu/nnacl_c/fp32/activation_fp32.h
++++ b/mindspore-lite/src/litert/kernel/cpu/nnacl_c/fp32/activation_fp32.h
+@@ -39,7 +39,7 @@ int HardTanh(const float *src, int length, float *dst, float min_val, float max_
+ int Gelu(const float *src, int length, float *dst, bool approximate);
+ int Softplus(const float *src, int length, float *dst);
+ int Elu(const float *src, int length, float *dst, float alpha);
+-void Celu(const float *src, int length, float *dst, float alpha);
++int Celu(const float *src, int length, float *dst, float alpha);
+ float TanhOpt(float src);
+ int HardShrink(const float *src, int length, float *dst, float lambd);
+ int SoftShrink(const float *src, int length, float *dst, float lambd);
 diff --git a/mindspore-lite/src/litert/kernel/cpu/nnacl_c/int8/celu_int8.c b/mindspore-lite/src/litert/kernel/cpu/nnacl_c/int8/celu_int8.c
 new file mode 100644
 index 00000000..3b6ba37c
@@ -391,10 +431,27 @@ index 50cb1389..df8de5b8 100644
      }
    }
 diff --git a/mindspore-lite/src/litert/kernel/cpu/nnacl_c/op_base.h b/mindspore-lite/src/litert/kernel/cpu/nnacl_c/op_base.h
-index f4482a5f..6296911c 100644
+index f4482a5f..e26e68f3 100644
 --- a/mindspore-lite/src/litert/kernel/cpu/nnacl_c/op_base.h
 +++ b/mindspore-lite/src/litert/kernel/cpu/nnacl_c/op_base.h
-@@ -716,7 +716,8 @@ typedef enum ActType {
+@@ -14,13 +14,9 @@
+  * limitations under the License.
+  */
+ 
+-#ifndef MINDSPORE_LITE_SRC_LITERT_KERNEL_CPU_NNACL_C_OP_BASE_H_
+-#define MINDSPORE_LITE_SRC_LITERT_KERNEL_CPU_NNACL_C_OP_BASE_H_
+-#if __has_include("mindspore/mindspore/ops/kernel/cpu/nnacl/op_base.h")
+-#include "mindspore/mindspore/ops/kernel/cpu/nnacl/op_base.h"
+-#undef MAX_SHAPE_SIZE
+-#define MAX_SHAPE_SIZE 16
+-#else
++#ifndef MINDSPORE_CCSRC_PLUGIN_DEVICE_CPU_KERNEL_NNACL_OP_BASE_H_
++#define MINDSPORE_CCSRC_PLUGIN_DEVICE_CPU_KERNEL_NNACL_OP_BASE_H_
++
+ #include <stdarg.h>
+ #include <stdint.h>
+ #include <stdlib.h>
+@@ -716,7 +712,8 @@ typedef enum ActType {
    ActType_Swish = 18,
    ActType_Gelu = 19,
    ActType_FastGelu = 20,
@@ -404,6 +461,13 @@ index f4482a5f..6296911c 100644
  } ActType;
  typedef enum PadType { Pad_pad, Pad_same, Pad_valid } PadType;
  typedef enum EltwiseType { Eltwise_PROD, Eltwise_SUM, Eltwise_MAXIMUM, Eltwise_UNKNOWN } EltwiseType;
+@@ -803,5 +800,4 @@ static inline void offset_to_index_step(int cnt, ...) {
+   }
+   va_end(valist);
+ }
+-#endif
+-#endif  // MINDSPORE_LITE_SRC_LITERT_KERNEL_CPU_NNACL_C_OP_BASE_H_
++#endif  // MINDSPORE_CCSRC_PLUGIN_DEVICE_CPU_KERNEL_NNACL_OP_BASE_H_
 diff --git a/mindspore-lite/tools/converter/import/primitive_adjust.cc b/mindspore-lite/tools/converter/import/primitive_adjust.cc
 index 252b5b86..147864cb 100644
 --- a/mindspore-lite/tools/converter/import/primitive_adjust.cc
@@ -444,6 +508,20 @@ index 252b5b86..147864cb 100644
  REGIST_PRIMITIVE_ADJUST(kNameMatMul, MoveAttrMapCommon<ops::MatMulFusion>)
  REGIST_PRIMITIVE_ADJUST(kBatchNormOpName, MoveAttrBatchNorm)
  REGIST_PRIMITIVE_ADJUST(kNameConv2DBackpropFilter, MoveAttrMapCommon<ops::Conv2DBackpropFilterFusion>)
+diff --git a/mindspore-lite/tools/converter/micro/coder/opcoders/nnacl/fp32/activation_fp32_coder.cc b/mindspore-lite/tools/converter/micro/coder/opcoders/nnacl/fp32/activation_fp32_coder.cc
+index bae2a839..a7c4a09b 100644
+--- a/mindspore-lite/tools/converter/micro/coder/opcoders/nnacl/fp32/activation_fp32_coder.cc
++++ b/mindspore-lite/tools/converter/micro/coder/opcoders/nnacl/fp32/activation_fp32_coder.cc
+@@ -72,6 +72,9 @@ int ActivationFP32Coder::DoCode(CoderContext *const context) {
+     case schema::ActivationType_ELU:
+       code.CodeFunction("Elu", input_tensor_, count, output_tensor_, activation_parameter->alpha_);
+       break;
++    case schema::ActivationType_CELU:
++      code.CodeFunction("Celu", input_tensor_, count, output_tensor_, activation_parameter->alpha_);
++      break;
+     default:
+       MS_LOG(ERROR) << "Activation type error";
+       return RET_ERROR;
 diff --git a/mindspore-lite/tools/converter/micro/coder/opcoders/nnacl/int8/activation_int8_coder.cc b/mindspore-lite/tools/converter/micro/coder/opcoders/nnacl/int8/activation_int8_coder.cc
 index 38cd39b2..69d833a5 100644
 --- a/mindspore-lite/tools/converter/micro/coder/opcoders/nnacl/int8/activation_int8_coder.cc
@@ -602,6 +680,35 @@ index 00000000..73c6af58
 +};
 +}  // namespace mindspore::lite::micro::nnacl
 +#endif  // MINDSPORE_LITE_TOOLS_CONVERTER_MICRO_CODER_OPCODERS_NNACL_INT8_CELU_INT8_CODER_H_
+diff --git a/mindspore-lite/tools/converter/parser/onnx/onnx_activation_parser.cc b/mindspore-lite/tools/converter/parser/onnx/onnx_activation_parser.cc
+index 3afd1693..58ceacfd 100644
+--- a/mindspore-lite/tools/converter/parser/onnx/onnx_activation_parser.cc
++++ b/mindspore-lite/tools/converter/parser/onnx/onnx_activation_parser.cc
+@@ -173,8 +173,9 @@ PrimitiveCPtr OnnxSeluParser::Parse(const onnx::GraphProto &onnx_graph, const on
+ }
+ 
+ PrimitiveCPtr OnnxCeluParser::Parse(const onnx::GraphProto &onnx_graph, const onnx::NodeProto &onnx_node) {
+-  auto prim = std::make_unique<ops::CeLU>();
++  auto prim = std::make_unique<ops::Activation>();
+   MS_CHECK_TRUE_RET(prim != nullptr, nullptr);
++  prim->set_activation_type(static_cast<mindspore::ActivationType>(schema::ActivationType_CELU));
+   for (const auto &onnx_node_attr : onnx_node.attribute()) {
+     const auto &attribute_name = onnx_node_attr.name();
+     if (attribute_name == "alpha") {
+diff --git a/mindspore-lite/tools/converter/quantizer/full_quant_quantizer.cc b/mindspore-lite/tools/converter/quantizer/full_quant_quantizer.cc
+index fbcda545..3406b531 100644
+--- a/mindspore-lite/tools/converter/quantizer/full_quant_quantizer.cc
++++ b/mindspore-lite/tools/converter/quantizer/full_quant_quantizer.cc
+@@ -510,6 +510,9 @@ void FullQuantQuantizer::InitCpuConfig() {
+     RELU, RELU6, HSWISH, SIGMOID, TANH,
+     // LEAKY_RELU must be symmetric.
+   };
++  if (param_->fullQuantParam.enable_all_ops) {
++    (void)support_activation_.emplace_back(static_cast<mindspore::ActivationType>(schema::ActivationType_CELU));
++  }
+ }
+ 
+ void FullQuantQuantizer::InitKirinConfig() {
 -- 
 2.34.1
 
