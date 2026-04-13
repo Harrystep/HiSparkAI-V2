@@ -1,0 +1,593 @@
+From f430d86f487a0e7c2f59e1e05f0b1fc25edd59d1 Mon Sep 17 00:00:00 2001
+From: gupengcheng0401 <gupengcheng4@huawei.com>
+Date: Mon, 13 Apr 2026 19:22:53 +0800
+Subject: [PATCH] support spacetodepth fp32&&int8 opcoder
+
+---
+ .../kernel/cpu/int8/space_to_depth_int8.cc    | 120 ++++++++++++++++++
+ .../kernel/cpu/int8/space_to_depth_int8.h     |  46 +++++++
+ .../cpu/nnacl_c/int8/space_to_depth_int8.c    |  56 ++++++++
+ .../cpu/nnacl_c/int8/space_to_depth_int8.h    |  33 +++++
+ .../nnacl/fp32/space_to_depth_fp32_coder.cc   |  71 +++++++++++
+ .../nnacl/fp32/space_to_depth_fp32_coder.h    |  41 ++++++
+ .../nnacl/int8/space_to_depth_int8_coder.cc   | 106 ++++++++++++++++
+ .../nnacl/int8/space_to_depth_int8_coder.h    |  45 +++++++
+ 8 files changed, 518 insertions(+)
+ create mode 100644 mindspore-lite/src/litert/kernel/cpu/int8/space_to_depth_int8.cc
+ create mode 100644 mindspore-lite/src/litert/kernel/cpu/int8/space_to_depth_int8.h
+ create mode 100644 mindspore-lite/src/litert/kernel/cpu/nnacl_c/int8/space_to_depth_int8.c
+ create mode 100644 mindspore-lite/src/litert/kernel/cpu/nnacl_c/int8/space_to_depth_int8.h
+ create mode 100644 mindspore-lite/tools/converter/micro/coder/opcoders/nnacl/fp32/space_to_depth_fp32_coder.cc
+ create mode 100644 mindspore-lite/tools/converter/micro/coder/opcoders/nnacl/fp32/space_to_depth_fp32_coder.h
+ create mode 100644 mindspore-lite/tools/converter/micro/coder/opcoders/nnacl/int8/space_to_depth_int8_coder.cc
+ create mode 100644 mindspore-lite/tools/converter/micro/coder/opcoders/nnacl/int8/space_to_depth_int8_coder.h
+
+diff --git a/mindspore-lite/src/litert/kernel/cpu/int8/space_to_depth_int8.cc b/mindspore-lite/src/litert/kernel/cpu/int8/space_to_depth_int8.cc
+new file mode 100644
+index 00000000..e4529f74
+--- /dev/null
++++ b/mindspore-lite/src/litert/kernel/cpu/int8/space_to_depth_int8.cc
+@@ -0,0 +1,120 @@
++/**
++ * Copyright 2025 Huawei Technologies Co., Ltd
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ * http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++#include "src/litert/kernel/cpu/int8/space_to_depth_int8.h"
++#include <cfloat>
++#include "schema/model_generated.h"
++#include "src/litert/kernel_registry.h"
++#include "nnacl_c/base/space_to_depth_base.h"
++#include "nnacl_c/int8/space_to_depth_int8.h"
++#include "include/errorcode.h"
++
++using mindspore::lite::KernelRegistrar;
++using mindspore::lite::RET_ERROR;
++using mindspore::lite::RET_FORMAT_ERR;
++using mindspore::lite::RET_OK;
++using mindspore::lite::RET_PARAM_INVALID;
++using mindspore::schema::PrimitiveType_SpaceToDepth;
++
++namespace mindspore::kernel {
++SpaceToDepthInt8CPUKernel::~SpaceToDepthInt8CPUKernel() {
++  if (in_quant_arg_ != nullptr) {
++    free(in_quant_arg_);
++    in_quant_arg_ = nullptr;
++  }
++  if (out_quant_arg_ != nullptr) {
++    free(out_quant_arg_);
++    out_quant_arg_ = nullptr;
++  }
++}
++
++int SpaceToDepthInt8CPUKernel::Prepare() {
++  CHECK_LESS_RETURN(in_tensors_.size(), 1);
++  CHECK_LESS_RETURN(out_tensors_.size(), 1);
++  CHECK_NULL_RETURN(in_tensors_[kInputIndex]);
++  CHECK_NULL_RETURN(out_tensors_[kOutputIndex]);
++  if (in_tensors_[kInputIndex]->data_type() != mindspore::kNumberTypeInt8 ||
++      out_tensors_[kOutputIndex]->data_type() != mindspore::kNumberTypeInt8) {
++    MS_LOG(ERROR) << "Datatype error, input0 data_type is " << in_tensors_[kInputIndex]->data_type()
++                  << ", output data_type is " << out_tensors_[kOutputIndex]->data_type();
++    return RET_ERROR;
++  }
++  if (param_->block_size_ <= 0) {
++    MS_LOG(ERROR) << "Input block_size should > 0!";
++    return RET_PARAM_INVALID;
++  }
++  param_->date_type_len = sizeof(int8_t);
++
++  in_quant_arg_ = reinterpret_cast<QuantArg *>(malloc(sizeof(QuantArg)));
++  if (in_quant_arg_ == nullptr) {
++    MS_LOG(ERROR) << "Malloc QuantArg for SpaceToDepth int8 op failed!";
++    return RET_ERROR;
++  }
++  auto in_quant_args = in_tensors_.at(kInputIndex)->quant_params();
++  CHECK_LESS_RETURN(in_quant_args.size(), 1);
++  in_quant_arg_->scale_ = in_quant_args.front().scale;
++  in_quant_arg_->zp_ = in_quant_args.front().zeroPoint;
++
++  out_quant_arg_ = reinterpret_cast<QuantArg *>(malloc(sizeof(QuantArg)));
++  if (out_quant_arg_ == nullptr) {
++    MS_LOG(ERROR) << "Malloc QuantArg for SpaceToDepth int8 op failed!";
++    return RET_ERROR;
++  }
++  auto out_quant_args = out_tensors_.at(kOutputIndex)->quant_params();
++  CHECK_LESS_RETURN(out_quant_args.size(), 1);
++  out_quant_arg_->scale_ = out_quant_args.front().scale;
++  out_quant_arg_->zp_ = out_quant_args.front().zeroPoint;
++
++  if (!InferShapeDone()) {
++    return RET_OK;
++  }
++  return ReSize();
++}
++
++int SpaceToDepthInt8CPUKernel::ReSize() {
++  if (in_tensors_[kInputIndex]->format() != mindspore::NHWC) {
++    MS_LOG(ERROR) << "space_to_depth only support NHWC now!";
++    return RET_FORMAT_ERR;
++  }
++  return RET_OK;
++}
++
++int SpaceToDepthInt8CPUKernel::Run() {
++  auto input = in_tensors_[kInputIndex];
++  auto output = out_tensors_[kOutputIndex];
++  const int8_t *input_data = reinterpret_cast<const int8_t *>(input->data());
++  CHECK_NULL_RETURN(input_data);
++  int8_t *output_data = reinterpret_cast<int8_t *>(output->data());
++  CHECK_NULL_RETURN(output_data);
++  auto in_shape = input->shape();
++  auto out_shape = output->shape();
++
++  if (std::abs(in_quant_arg_->scale_ - out_quant_arg_->scale_) < FLT_EPSILON &&
++      in_quant_arg_->zp_ == out_quant_arg_->zp_) {
++    auto ret = SpaceToDepthForNHWC(input_data, output_data, in_shape.data(), out_shape.data(), in_shape.size(), param_,
++                                   0);
++    if (ret != NNACL_OK) {
++      MS_LOG(ERROR) << "SpaceToDepthForNHWC failed.";
++      return RET_ERROR;
++    }
++  } else {
++    SpaceToDepthForNHWCInt8(input_data, output_data, in_shape.data(), out_shape.data(), in_shape.size(), param_,
++                            in_quant_arg_, out_quant_arg_);
++  }
++  return RET_OK;
++}
++
++REG_KERNEL(kCPU, kNumberTypeInt8, PrimitiveType_SpaceToDepth, LiteKernelCreator<SpaceToDepthInt8CPUKernel>)
++}  // namespace mindspore::kernel
+diff --git a/mindspore-lite/src/litert/kernel/cpu/int8/space_to_depth_int8.h b/mindspore-lite/src/litert/kernel/cpu/int8/space_to_depth_int8.h
+new file mode 100644
+index 00000000..d6630af6
+--- /dev/null
++++ b/mindspore-lite/src/litert/kernel/cpu/int8/space_to_depth_int8.h
+@@ -0,0 +1,46 @@
++/**
++ * Copyright 2025 Huawei Technologies Co., Ltd
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ * http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++#ifndef MINDSPORE_LITE_SRC_RUNTIME_KERNEL_CPU_INT8_SPACE_TO_DEPTH_INT8_H_
++#define MINDSPORE_LITE_SRC_RUNTIME_KERNEL_CPU_INT8_SPACE_TO_DEPTH_INT8_H_
++
++#include <vector>
++#include "include/errorcode.h"
++#include "src/litert/lite_kernel.h"
++#include "nnacl_c/space_to_depth_parameter.h"
++#include "nnacl_c/int8/quantize.h"
++
++namespace mindspore::kernel {
++class SpaceToDepthInt8CPUKernel : public LiteKernel {
++ public:
++  SpaceToDepthInt8CPUKernel(OpParameter *parameter, const std::vector<lite::Tensor *> &inputs,
++                            const std::vector<lite::Tensor *> &outputs, const lite::InnerContext *ctx)
++      : LiteKernel(parameter, inputs, outputs, ctx) {
++    param_ = reinterpret_cast<SpaceToDepthParameter *>(op_parameter_);
++  }
++  ~SpaceToDepthInt8CPUKernel() override;
++
++  int Prepare() override;
++  int ReSize() override;
++  int Run() override;
++
++ private:
++  SpaceToDepthParameter *param_ = nullptr;
++  QuantArg *in_quant_arg_ = nullptr;
++  QuantArg *out_quant_arg_ = nullptr;
++};
++}  // namespace mindspore::kernel
++
++#endif  // MINDSPORE_LITE_SRC_RUNTIME_KERNEL_CPU_INT8_SPACE_TO_DEPTH_INT8_H_
+diff --git a/mindspore-lite/src/litert/kernel/cpu/nnacl_c/int8/space_to_depth_int8.c b/mindspore-lite/src/litert/kernel/cpu/nnacl_c/int8/space_to_depth_int8.c
+new file mode 100644
+index 00000000..d486c6f5
+--- /dev/null
++++ b/mindspore-lite/src/litert/kernel/cpu/nnacl_c/int8/space_to_depth_int8.c
+@@ -0,0 +1,56 @@
++/**
++ * Copyright 2025 Huawei Technologies Co., Ltd
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ * http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++#include "nnacl_c/int8/space_to_depth_int8.h"
++#include "nnacl_c/common_func.h"
++
++void SpaceToDepthForNHWCInt8(const int8_t *input, int8_t *output, const int32_t *in_shape, const int32_t *out_shape,
++                             int shape_size, SpaceToDepthParameter *param, QuantArg *in_quant_arg,
++                             QuantArg *out_quant_arg) {
++  int block_size = param->block_size_;
++  int in_strides[C4NUM];
++  int out_strides[C4NUM];
++  ComputeStrides(in_shape, in_strides, shape_size);
++  ComputeStrides(out_shape, out_strides, shape_size);
++
++  const float output_inverse_scale = 1.f / out_quant_arg->scale_;
++  float scale = in_quant_arg->scale_ * output_inverse_scale;
++  float bias = -in_quant_arg->zp_ * scale;
++  int32_t output_zp = out_quant_arg->zp_;
++  int copy_size = block_size * in_strides[DIMENSION_2D];
++
++  for (int i = 0; i < out_shape[0]; ++i) {
++    int64_t in_offset_n = i * in_strides[0];
++    int64_t out_offset_n = i * out_strides[0];
++    for (int j = 0; j < out_shape[1]; ++j) {
++      int64_t in_offset_h = in_offset_n + j * block_size * in_strides[1];
++      int64_t out_offset_h = out_offset_n + j * out_strides[1];
++      for (int k = 0; k < out_shape[2]; ++k) {
++        int64_t in_offset_w = in_offset_h + k * block_size * in_strides[2];
++        int64_t out_offset_w = out_offset_h + k * out_strides[2];
++        for (int l = 0; l < block_size; ++l) {
++          int64_t out_base = out_offset_w + l * block_size * in_strides[DIMENSION_2D];
++          int64_t in_base = in_offset_w + l * in_strides[DIMENSION_1D];
++          for (int m = 0; m < copy_size; ++m) {
++            int32_t output_tmp = round(input[in_base + m] * scale + bias) + output_zp;
++            output_tmp = output_tmp > 127 ? 127 : output_tmp;
++            output_tmp = output_tmp < -128 ? -128 : output_tmp;
++            output[out_base + m] = (int8_t)output_tmp;
++          }
++        }
++      }
++    }
++  }
++}
+diff --git a/mindspore-lite/src/litert/kernel/cpu/nnacl_c/int8/space_to_depth_int8.h b/mindspore-lite/src/litert/kernel/cpu/nnacl_c/int8/space_to_depth_int8.h
+new file mode 100644
+index 00000000..607ee055
+--- /dev/null
++++ b/mindspore-lite/src/litert/kernel/cpu/nnacl_c/int8/space_to_depth_int8.h
+@@ -0,0 +1,33 @@
++/**
++ * Copyright 2025 Huawei Technologies Co., Ltd
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ * http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++#ifndef NNACL_INT8_SPACE_TO_DEPTH_INT8_H_
++#define NNACL_INT8_SPACE_TO_DEPTH_INT8_H_
++
++#include "nnacl_c/space_to_depth_parameter.h"
++#include "nnacl_c/int8/quantize.h"
++#include "nnacl_c/op_base.h"
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++void SpaceToDepthForNHWCInt8(const int8_t *input, int8_t *output, const int32_t *in_shape, const int32_t *out_shape,
++                             int shape_size, SpaceToDepthParameter *param, QuantArg *in_quant_arg,
++                             QuantArg *out_quant_arg);
++#ifdef __cplusplus
++}
++#endif
++
++#endif  // NNACL_INT8_SPACE_TO_DEPTH_INT8_H_
+diff --git a/mindspore-lite/tools/converter/micro/coder/opcoders/nnacl/fp32/space_to_depth_fp32_coder.cc b/mindspore-lite/tools/converter/micro/coder/opcoders/nnacl/fp32/space_to_depth_fp32_coder.cc
+new file mode 100644
+index 00000000..fe178188
+--- /dev/null
++++ b/mindspore-lite/tools/converter/micro/coder/opcoders/nnacl/fp32/space_to_depth_fp32_coder.cc
+@@ -0,0 +1,71 @@
++/**
++ * Copyright 2025 Huawei Technologies Co., Ltd
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ * http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#include "coder/opcoders/nnacl/fp32/space_to_depth_fp32_coder.h"
++#include <vector>
++#include "coder/opcoders/serializers/nnacl_serializer/nnacl_fp32_serializer.h"
++#include "coder/opcoders/file_collector.h"
++#include "coder/utils/common.h"
++
++using mindspore::schema::PrimitiveType_SpaceToDepth;
++
++namespace mindspore::lite::micro::nnacl {
++int SpaceToDepthFp32Coder::Prepare(CoderContext *const context) {
++  param_ = reinterpret_cast<SpaceToDepthParameter *>(parameter_);
++  MS_CHECK_PTR(param_);
++
++  auto in_shape = input_tensor_->shape();
++  auto out_shape = output_tensor_->shape();
++  MS_CHECK_TRUE_RET(in_shape.size() == DIMENSION_4D, RET_ERROR);
++  MS_CHECK_TRUE_RET(out_shape.size() == DIMENSION_4D, RET_ERROR);
++  return RET_OK;
++}
++
++int SpaceToDepthFp32Coder::DoCode(CoderContext *const context) {
++  Collect(context,
++          {
++            "nnacl_c/base/space_to_depth_base.h",
++            "nnacl_c/space_to_depth_parameter.h",
++          },
++          {
++            "space_to_depth_base.c",
++          });
++
++  NNaclFp32Serializer code;
++  code.precision(kPrecision);
++
++  // Emit SpaceToDepthParameter with thread_num_ = 1 for single-threaded Micro runtime
++  code << "    SpaceToDepthParameter space_to_depth_param;\n";
++  code << "    memset(&space_to_depth_param, 0, sizeof(SpaceToDepthParameter));\n";
++  code << "    space_to_depth_param.op_parameter_.thread_num_ = 1;\n";
++  code << "    space_to_depth_param.block_size_ = " << param_->block_size_ << ";\n";
++  code << "    space_to_depth_param.date_type_len = " << sizeof(float) << ";\n";
++
++  auto in_shape = input_tensor_->shape();
++  auto out_shape = output_tensor_->shape();
++  code.CodeArray("in_shape", in_shape.data(), DIMENSION_4D, true);
++  code.CodeArray("out_shape", out_shape.data(), DIMENSION_4D, true);
++
++  code.CodeFunction("SpaceToDepthForNHWC", input_tensor_, output_tensor_, "in_shape", "out_shape",
++                    in_shape.size(), "&space_to_depth_param", 0);
++
++  context->AppendCode(code.str());
++  return RET_OK;
++}
++
++REG_OPERATOR_CODER(kAllTargets, kNumberTypeFloat32, PrimitiveType_SpaceToDepth,
++                   CPUOpCoderCreator<SpaceToDepthFp32Coder>)
++}  // namespace mindspore::lite::micro::nnacl
+diff --git a/mindspore-lite/tools/converter/micro/coder/opcoders/nnacl/fp32/space_to_depth_fp32_coder.h b/mindspore-lite/tools/converter/micro/coder/opcoders/nnacl/fp32/space_to_depth_fp32_coder.h
+new file mode 100644
+index 00000000..7fbfb655
+--- /dev/null
++++ b/mindspore-lite/tools/converter/micro/coder/opcoders/nnacl/fp32/space_to_depth_fp32_coder.h
+@@ -0,0 +1,41 @@
++/**
++ * Copyright 2025 Huawei Technologies Co., Ltd
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ * http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#ifndef MINDSPORE_LITE_TOOLS_CONVERTER_MICRO_CODER_OPCODERS_NNACL_FP32_SPACE_TO_DEPTH_FP32_CODER_H_
++#define MINDSPORE_LITE_TOOLS_CONVERTER_MICRO_CODER_OPCODERS_NNACL_FP32_SPACE_TO_DEPTH_FP32_CODER_H_
++
++#include <vector>
++#include "coder/opcoders/op_coder.h"
++#include "nnacl_c/space_to_depth_parameter.h"
++
++namespace mindspore::lite::micro::nnacl {
++class SpaceToDepthFp32Coder final : public OperatorCoder {
++ public:
++  SpaceToDepthFp32Coder(const std::vector<Tensor *> &in_tensors, const std::vector<Tensor *> &out_tensors,
++                        const LiteGraph::Node *node, size_t node_index, Target target)
++      : OperatorCoder(in_tensors, out_tensors, node, node_index, target) {}
++
++  ~SpaceToDepthFp32Coder() override = default;
++
++  int Prepare(CoderContext *const context) override;
++
++  int DoCode(CoderContext *const context) override;
++
++ private:
++  SpaceToDepthParameter *param_{nullptr};
++};
++}  // namespace mindspore::lite::micro::nnacl
++#endif  // MINDSPORE_LITE_TOOLS_CONVERTER_MICRO_CODER_OPCODERS_NNACL_FP32_SPACE_TO_DEPTH_FP32_CODER_H_
+diff --git a/mindspore-lite/tools/converter/micro/coder/opcoders/nnacl/int8/space_to_depth_int8_coder.cc b/mindspore-lite/tools/converter/micro/coder/opcoders/nnacl/int8/space_to_depth_int8_coder.cc
+new file mode 100644
+index 00000000..14f8765b
+--- /dev/null
++++ b/mindspore-lite/tools/converter/micro/coder/opcoders/nnacl/int8/space_to_depth_int8_coder.cc
+@@ -0,0 +1,106 @@
++/**
++ * Copyright 2025 Huawei Technologies Co., Ltd
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ * http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#include "coder/opcoders/nnacl/int8/space_to_depth_int8_coder.h"
++#include <cfloat>
++#include <vector>
++#include "coder/opcoders/serializers/nnacl_serializer/nnacl_int8_serializer.h"
++#include "coder/opcoders/file_collector.h"
++#include "coder/utils/common.h"
++
++using mindspore::schema::PrimitiveType_SpaceToDepth;
++
++namespace mindspore::lite::micro::nnacl {
++int SpaceToDepthInt8Coder::Prepare(CoderContext *const context) {
++  param_ = reinterpret_cast<SpaceToDepthParameter *>(parameter_);
++  MS_CHECK_PTR(param_);
++
++  auto in_shape = input_tensor_->shape();
++  auto out_shape = output_tensor_->shape();
++  MS_CHECK_TRUE_RET(in_shape.size() == DIMENSION_4D, RET_ERROR);
++  MS_CHECK_TRUE_RET(out_shape.size() == DIMENSION_4D, RET_ERROR);
++
++  auto in_quant_params = input_tensor_->quant_params();
++  auto out_quant_params = output_tensor_->quant_params();
++  MS_CHECK_TRUE_RET(!in_quant_params.empty(), RET_ERROR);
++  MS_CHECK_TRUE_RET(!out_quant_params.empty(), RET_ERROR);
++
++  in_quant_arg_.scale_ = static_cast<float>(in_quant_params.front().scale);
++  in_quant_arg_.zp_ = in_quant_params.front().zeroPoint;
++  out_quant_arg_.scale_ = static_cast<float>(out_quant_params.front().scale);
++  out_quant_arg_.zp_ = out_quant_params.front().zeroPoint;
++
++  same_quant_ = (std::abs(in_quant_arg_.scale_ - out_quant_arg_.scale_) < FLT_EPSILON &&
++                 in_quant_arg_.zp_ == out_quant_arg_.zp_);
++
++  return RET_OK;
++}
++
++int SpaceToDepthInt8Coder::DoCode(CoderContext *const context) {
++  if (same_quant_) {
++    Collect(context,
++            {
++              "nnacl_c/base/space_to_depth_base.h",
++              "nnacl_c/space_to_depth_parameter.h",
++            },
++            {
++              "space_to_depth_base.c",
++            });
++  } else {
++    Collect(context,
++            {
++              "nnacl_c/int8/space_to_depth_int8.h",
++              "nnacl_c/space_to_depth_parameter.h",
++              "nnacl_c/int8/quantize.h",
++              "nnacl_c/common_func.h",
++            },
++            {
++              "space_to_depth_int8.c",
++            });
++  }
++
++  NNaclInt8Serializer code;
++  code.precision(kPrecision);
++
++  // Emit SpaceToDepthParameter with thread_num_ = 1 for single-threaded Micro runtime
++  code << "    SpaceToDepthParameter space_to_depth_param;\n";
++  code << "    memset(&space_to_depth_param, 0, sizeof(SpaceToDepthParameter));\n";
++  code << "    space_to_depth_param.op_parameter_.thread_num_ = 1;\n";
++  code << "    space_to_depth_param.block_size_ = " << param_->block_size_ << ";\n";
++  code << "    space_to_depth_param.date_type_len = " << sizeof(int8_t) << ";\n";
++
++  auto in_shape = input_tensor_->shape();
++  auto out_shape = output_tensor_->shape();
++  code.CodeArray("in_shape", in_shape.data(), DIMENSION_4D, true);
++  code.CodeArray("out_shape", out_shape.data(), DIMENSION_4D, true);
++
++  if (same_quant_) {
++    code.CodeFunction("SpaceToDepthForNHWC", input_tensor_, output_tensor_, "in_shape", "out_shape",
++                      in_shape.size(), "&space_to_depth_param", 0);
++  } else {
++    code.CodeBaseStruct<false>("QuantArg", "in_quant_arg", in_quant_arg_.scale_, in_quant_arg_.zp_);
++    code.CodeBaseStruct<false>("QuantArg", "out_quant_arg", out_quant_arg_.scale_, out_quant_arg_.zp_);
++    code.CodeFunction("SpaceToDepthForNHWCInt8", input_tensor_, output_tensor_, "in_shape", "out_shape",
++                      in_shape.size(), "&space_to_depth_param", "&in_quant_arg", "&out_quant_arg");
++  }
++
++  context->AppendCode(code.str());
++  return RET_OK;
++}
++
++REG_OPERATOR_CODER(kAllTargets, kNumberTypeInt8, PrimitiveType_SpaceToDepth,
++                   CPUOpCoderCreator<SpaceToDepthInt8Coder>)
++}  // namespace mindspore::lite::micro::nnacl
+diff --git a/mindspore-lite/tools/converter/micro/coder/opcoders/nnacl/int8/space_to_depth_int8_coder.h b/mindspore-lite/tools/converter/micro/coder/opcoders/nnacl/int8/space_to_depth_int8_coder.h
+new file mode 100644
+index 00000000..234f97fb
+--- /dev/null
++++ b/mindspore-lite/tools/converter/micro/coder/opcoders/nnacl/int8/space_to_depth_int8_coder.h
+@@ -0,0 +1,45 @@
++/**
++ * Copyright 2025 Huawei Technologies Co., Ltd
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ * http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#ifndef MINDSPORE_LITE_TOOLS_CONVERTER_MICRO_CODER_OPCODERS_NNACL_INT8_SPACE_TO_DEPTH_INT8_CODER_H_
++#define MINDSPORE_LITE_TOOLS_CONVERTER_MICRO_CODER_OPCODERS_NNACL_INT8_SPACE_TO_DEPTH_INT8_CODER_H_
++
++#include <vector>
++#include "coder/opcoders/op_coder.h"
++#include "nnacl_c/space_to_depth_parameter.h"
++#include "nnacl_c/int8/quantize.h"
++
++namespace mindspore::lite::micro::nnacl {
++class SpaceToDepthInt8Coder final : public OperatorCoder {
++ public:
++  SpaceToDepthInt8Coder(const std::vector<Tensor *> &in_tensors, const std::vector<Tensor *> &out_tensors,
++                        const LiteGraph::Node *node, size_t node_index, Target target)
++      : OperatorCoder(in_tensors, out_tensors, node, node_index, target) {}
++
++  ~SpaceToDepthInt8Coder() override = default;
++
++  int Prepare(CoderContext *const context) override;
++
++  int DoCode(CoderContext *const context) override;
++
++ private:
++  SpaceToDepthParameter *param_{nullptr};
++  QuantArg in_quant_arg_{};
++  QuantArg out_quant_arg_{};
++  bool same_quant_{false};
++};
++}  // namespace mindspore::lite::micro::nnacl
++#endif  // MINDSPORE_LITE_TOOLS_CONVERTER_MICRO_CODER_OPCODERS_NNACL_INT8_SPACE_TO_DEPTH_INT8_CODER_H_
+-- 
+2.34.1
+
